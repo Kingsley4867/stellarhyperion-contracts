@@ -37,6 +37,7 @@ pub struct Dispatched {
     pub mint_recipient: BytesN<32>,
     pub max_fee: i128,
     pub min_finality_threshold: u32,
+    pub mapping_revision: u32,
     /// The router's own outbound nonce, so the two halves of the trail can be joined up.
     pub router_nonce: u64,
 }
@@ -57,6 +58,7 @@ pub struct Received {
     /// Nonzero when the router had to park the delivery instead of handing it straight over.
     pub claim_id: u64,
     pub relayer: Address,
+    pub mapping_revision: u32,
 }
 
 /// Leftovers moved out of the adapter and into the treasury.
@@ -86,6 +88,9 @@ pub struct AssetMapped {
     pub domain: u32,
     pub burn_token: BytesN<32>,
     pub local: Address,
+    pub revision: u32,
+    pub local_decimals: u32,
+    pub remote_decimals: u32,
 }
 
 #[contractevent(topics = ["hyperion", "cctp_cfg"])]

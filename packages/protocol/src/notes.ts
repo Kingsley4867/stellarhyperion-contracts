@@ -23,6 +23,7 @@ import {
 } from "./addresses.js";
 import { bytesToAscii, bytesToBigInt, concatBytes, fromHex, toHex } from "./bytes.js";
 import type { Hex } from "./bytes.js";
+import { CCTP_HOOK_VERSION } from "./cctp.js";
 import { fail } from "./errors.js";
 
 /** One envelope version across both rails, so nobody has to remember which rail numbers what. */
@@ -169,45 +170,65 @@ function decodeInboundNoteV1(bytes: Uint8Array): InboundNote {
 /**
  * The hook a CCTP burn carries so the far side knows who the USDC is for.
  *
- * `[version][tagged destination]`. Thirty four bytes, or forty two for a muxed destination.
+ * `[version][mapping revision][tagged destination]`. Thirty eight bytes, or forty six for a
+ * muxed destination.
  *
  * CCTP's mint recipient is a bare thirty two byte slot with no room for a type tag, and no bridge
  * can tell a contract id from an account key by looking at it. So the mint recipient names
  * Hyperion's own adapter on the far side and the real destination rides in here, where there is
  * room to say which of the three kinds it is.
  */
-export function encodeCctpHook(strkey: string): Uint8Array {
+export function encodeCctpHook(strkey: string, mappingRevision: number): Uint8Array {
+  if (!Number.isInteger(mappingRevision) || mappingRevision <= 0 || mappingRevision > 0xffff_ffff) {
+    fail("StaleMapping");
+  }
   const parts = parseStellarAddress(strkey);
-  return concatBytes(Uint8Array.of(NOTE_VERSION), taggedDestination(parts));
+  const revision = Uint8Array.of(
+    (mappingRevision >>> 24) & 0xff,
+    (mappingRevision >>> 16) & 0xff,
+    (mappingRevision >>> 8) & 0xff,
+    mappingRevision & 0xff,
+  );
+  return concatBytes(Uint8Array.of(CCTP_HOOK_VERSION), revision, taggedDestination(parts));
 }
 
 /** Read a CCTP hook back into the destination it names. */
 export function decodeCctpHook(payload: Uint8Array | Hex): {
+  mappingRevision: number;
   kind: AddressKind;
   key: Hex;
   muxedId: bigint;
 } {
   const bytes = typeof payload === "string" ? fromHex(payload) : payload;
-  if (bytes.length !== 34 && bytes.length !== 42) {
+  if (bytes.length !== 38 && bytes.length !== 46) {
     fail(
       "MalformedMessage",
-      `a hook is thirty four or forty two bytes, got ${String(bytes.length)}`,
+      `a revision-bound hook is thirty eight or forty six bytes, got ${String(bytes.length)}`,
     );
   }
-  if (bytes[0] !== NOTE_VERSION) fail("UnsupportedHookVersion", `hook version ${String(bytes[0])}`);
+  if (bytes[0] !== CCTP_HOOK_VERSION) {
+    fail("UnsupportedHookVersion", `hook version ${String(bytes[0])}`);
+  }
+  const mappingRevision = Number(bytesToBigInt(bytes.slice(1, 5)));
+  if (mappingRevision === 0) fail("StaleMapping");
 
-  const tag = bytes[1] ?? 0xff;
+  const tag = bytes[5] ?? 0xff;
   if (tag > AddressKind.MuxedAccount) fail("MalformedMessage", `address kind ${String(tag)}`);
   const kind = tag as AddressKind;
   const wantsMuxed = kind === AddressKind.MuxedAccount;
-  if (wantsMuxed !== (bytes.length === 42)) {
+  if (wantsMuxed !== (bytes.length === 46)) {
     fail("MalformedMessage", "the kind tag and the hook length disagree");
   }
 
-  const key = toHex(bytes.slice(2, 34));
-  if (bytesToBigInt(bytes.slice(2, 34)) === 0n) fail("ZeroAddressKey");
+  const key = toHex(bytes.slice(6, 38));
+  if (bytesToBigInt(bytes.slice(6, 38)) === 0n) fail("ZeroAddressKey");
 
-  return { kind, key, muxedId: wantsMuxed ? bytesToBigInt(bytes.slice(34, 42)) : 0n };
+  return {
+    mappingRevision,
+    kind,
+    key,
+    muxedId: wantsMuxed ? bytesToBigInt(bytes.slice(38, 46)) : 0n,
+  };
 }
 
 /**

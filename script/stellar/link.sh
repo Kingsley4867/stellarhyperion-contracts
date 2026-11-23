@@ -18,6 +18,11 @@
 #   AXELAR_TOKEN_ID=0x... \
 #   script/stellar/link.sh
 source "$(dirname "$0")/lib.sh"
+if is_dry_run; then
+  command -v node >/dev/null || die "node is not on PATH"
+  node "$CONTRACTS_ROOT/script/stellar/unsigned-plan.mjs" link || die "unsigned link plan refused"
+  exit 0
+fi
 require_tools
 require_identity
 

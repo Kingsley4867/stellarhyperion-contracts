@@ -1,6 +1,6 @@
 //! The leg where USDC leaves Stellar and Circle burns it.
 
-use hyperion_core::{HyperionError, RouteKind};
+use hyperion_core::{cctp::CctpOutboundNote, HyperionError, RouteKind};
 use hyperion_router::{Destination, OutboundRequest};
 use soroban_sdk::{
     events::Event as _,
@@ -28,6 +28,7 @@ fn request(world: &World, amount: i128) -> OutboundRequest {
         destination: Destination {
             chain: world.ethereum(),
             address: evm(world, 0x11),
+            mapping_revision: 1,
         },
         destination_decimals: EVM_DECIMALS,
         min_destination_amount: 0,
@@ -46,7 +47,7 @@ fn a_transfer_walks_from_the_router_through_the_adapter_into_circles_burn() {
     );
     assert_eq!(quote.max_fee, 0);
 
-    w.router().bridge_out(&w.user, &request(&w, HUNDRED));
+    let nonce = w.router().bridge_out(&w.user, &request(&w, HUNDRED));
 
     let net = net_of(HUNDRED);
     let burn = w.messenger().last_burn();
@@ -61,13 +62,37 @@ fn a_transfer_walks_from_the_router_through_the_adapter_into_circles_burn() {
     // A finalized transfer is free, so there is nothing to budget for.
     assert_eq!(burn.max_fee, 0);
     assert_eq!(burn.min_finality_threshold, 2000);
-    // The EVM side mints straight to the recipient, so there is nothing to say in a hook.
-    assert!(!burn.had_hook);
+    assert!(burn.had_hook);
+    let note = CctpOutboundNote::decode(&w.env, &w.messenger().last_hook()).unwrap();
+    assert_eq!(note.mapping_revision, 1);
+    assert_eq!(note.recipient, evm(&w, 0x11));
+    assert_eq!(note.router_nonce, nonce);
 
     // Nothing is left anywhere it should not be.
     assert_eq!(w.token().balance(&w.adapter_id), 0);
     assert_eq!(w.token().balance(&w.router_id), 0);
     assert_eq!(w.token().balance(&w.treasury), HUNDRED - net);
+}
+
+#[test]
+fn a_stale_dispatch_revision_is_rejected_before_the_burn() {
+    let w = World::new();
+    let before = w.token().balance(&w.user);
+    w.adapter().map_asset(
+        &ETHEREUM_DOMAIN,
+        &w.eth_usdc(),
+        &w.token_id,
+        &hyperion_core::STELLAR_DECIMALS,
+        &EVM_DECIMALS,
+        &2,
+    );
+
+    assert_eq!(
+        w.router().try_bridge_out(&w.user, &request(&w, HUNDRED)),
+        Err(Ok(HyperionError::StaleMapping))
+    );
+    assert_eq!(w.messenger().burn_count(), 0);
+    assert_eq!(w.token().balance(&w.user), before);
 }
 
 #[test]
@@ -91,12 +116,14 @@ fn preview_and_dispatch_share_burn_boundary_for_invalid_stored_fee_policy() {
         crate::storage::set_config(&w.env, &cfg);
     });
     assert_eq!(
-        w.adapter().try_check_dispatch(
+        w.adapter().try_check_dispatch_revision(
             &w.router_id,
             &w.token_id,
             &HUNDRED,
             &w.ethereum(),
             &evm(&w, 0x11),
+            &1,
+            &EVM_DECIMALS,
             &None,
         ),
         Err(Ok(HyperionError::FeeTooHigh))
@@ -106,12 +133,14 @@ fn preview_and_dispatch_share_burn_boundary_for_invalid_stored_fee_policy() {
         Err(Ok(HyperionError::FeeTooHigh))
     );
     assert_eq!(
-        w.adapter().try_dispatch(
+        w.adapter().try_dispatch_revision(
             &w.router_id,
             &w.token_id,
             &HUNDRED,
             &w.ethereum(),
             &evm(&w, 0x11),
+            &1,
+            &EVM_DECIMALS,
             &1,
         ),
         Err(Ok(HyperionError::FeeTooHigh))
@@ -153,12 +182,14 @@ fn nobody_but_the_router_can_put_anything_on_this_rail() {
     // The adapter is holding real money and this call would burn it. Being able to reach the
     // function is not the same as being allowed to use it.
     assert_eq!(
-        w.adapter().try_dispatch(
+        w.adapter().try_dispatch_revision(
             &stranger,
             &w.token_id,
             &HUNDRED,
             &w.ethereum(),
             &evm(&w, 0x11),
+            &1,
+            &EVM_DECIMALS,
             &1
         ),
         Err(Ok(HyperionError::Unauthorized))
@@ -173,12 +204,14 @@ fn a_chain_the_admin_never_linked_is_refused_before_any_approval_is_granted() {
     w.fund_adapter(HUNDRED);
 
     assert_eq!(
-        w.adapter().try_dispatch(
+        w.adapter().try_dispatch_revision(
             &w.router_id,
             &w.token_id,
             &HUNDRED,
             &String::from_str(&w.env, "arbitrum"),
             &evm(&w, 0x11),
+            &1,
+            &EVM_DECIMALS,
             &1
         ),
         Err(Ok(HyperionError::UnknownChain))
@@ -194,12 +227,14 @@ fn an_all_zero_mint_recipient_is_refused_here_rather_than_two_contracts_away() {
     // Circle refuses this too, with its own error. Catching it early is the difference between a
     // reason the app can show a user and a panic from inside somebody else's contract.
     assert_eq!(
-        w.adapter().try_dispatch(
+        w.adapter().try_dispatch_revision(
             &w.router_id,
             &w.token_id,
             &HUNDRED,
             &w.ethereum(),
             &BytesN::from_array(&w.env, &[0u8; 32]),
+            &1,
+            &EVM_DECIMALS,
             &1
         ),
         Err(Ok(HyperionError::InvalidDestination))
@@ -211,12 +246,14 @@ fn zero_and_negative_amounts_never_reach_circle() {
     let w = World::new();
     for amount in [0i128, -1, -HUNDRED] {
         assert_eq!(
-            w.adapter().try_dispatch(
+            w.adapter().try_dispatch_revision(
                 &w.router_id,
                 &w.token_id,
                 &amount,
                 &w.ethereum(),
                 &evm(&w, 0x11),
+                &1,
+                &EVM_DECIMALS,
                 &1
             ),
             Err(Ok(HyperionError::InvalidAmount))

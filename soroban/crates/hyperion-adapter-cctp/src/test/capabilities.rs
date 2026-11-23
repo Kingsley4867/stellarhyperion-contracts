@@ -33,6 +33,6 @@ fn advertises_only_the_route_it_serves() {
 fn the_paid_entry_point_is_declared_and_callable() {
     let methods = capability::values(SNAPSHOT, "method");
     let paid = capability::values(SNAPSHOT, "paid-method");
-    assert_eq!(paid, ["dispatch_from"]);
-    assert!(methods.contains(&"dispatch_from"));
+    assert_eq!(paid, ["dispatch_from_revision"]);
+    assert!(methods.contains(&"dispatch_from_revision"));
 }

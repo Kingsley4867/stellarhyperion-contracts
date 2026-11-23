@@ -11,6 +11,7 @@ import {
     RailNotConfigured,
     RefundFailed,
     ReplayedMessage,
+    StaleMapping,
     TimelockDelayOutOfRange,
     TimelockNotQueued,
     TimelockNotReady,
@@ -18,9 +19,10 @@ import {
     Unauthorized,
     UnexpectedRailContract,
     UnknownChain,
+    WrongDomain,
     ZeroAddress
 } from "../../src/HyperionErrors.sol";
-import {AddressKind, Destination, RouteKind} from "../../src/HyperionTypes.sol";
+import {AddressKind, Destination, PendingClaim, RouteKind} from "../../src/HyperionTypes.sol";
 import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {Fixture} from "../Fixture.sol";
 import {DeafRouter} from "../mocks/HostileCallers.sol";
@@ -64,6 +66,8 @@ contract InconsistentApprovalToken is MockERC20 {
 contract CctpAdapterTest is Fixture {
     /// @dev Circle's own number for Stellar.
     uint32 internal constant STELLAR_DOMAIN = 27;
+    bytes32 internal constant REMOTE_STELLAR_USDC = keccak256("Stellar USDC");
+    bytes32 internal constant REMOTE_STELLAR_TOKEN = keccak256("remote USDC");
 
     /// @dev Hyperion's Soroban adapter, which is where every burn on this lane lands. A real
     /// contract id rather than a pattern, because a mint recipient is exactly the value nobody
@@ -80,7 +84,14 @@ contract CctpAdapterTest is Fixture {
     event ApprovalAudited(
         address indexed token, address indexed spender, uint256 beforeValue, uint256 afterValue, bool clean
     );
-    event LaneConfigured(string chain, uint32 domain, bytes32 mintRecipient);
+    event LaneConfigured(
+        string chain,
+        uint32 domain,
+        bytes32 mintRecipient,
+        bytes32 remoteToken,
+        uint8 remoteDecimals,
+        uint32 mappingRevision
+    );
     event LaneEnabled(string chain, bool enabled);
     event BurnSubmitted(
         string chain, uint32 domain, uint256 amount, bytes32 mintRecipient, uint64 nonce, bytes hookData
@@ -103,9 +114,10 @@ contract CctpAdapterTest is Fixture {
             STELLAR,
             keccak256("remote Circle TokenMessenger"),
             MINT_RECIPIENT,
-            keccak256("remote USDC")
+            REMOTE_STELLAR_TOKEN,
+            7
         );
-        adapter.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+        adapter.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
         vm.stopPrank();
         _setRailReceiver(RouteKind.Cctp, address(adapter));
     }
@@ -119,6 +131,11 @@ contract CctpAdapterTest is Fixture {
         assertEq(address(adapter.TOKEN_MESSENGER()), address(messenger));
         assertEq(adapter.USDC(), address(usdc));
         assertEq(adapter.owner(), admin);
+        CctpAdapter.Lane memory lane = adapter.laneOf(STELLAR);
+        assertEq(lane.localDecimals, 6);
+        assertEq(lane.remoteDecimals, 7);
+        assertEq(lane.mappingRevision, 1);
+        assertEq(lane.remoteToken, REMOTE_STELLAR_USDC);
     }
 
     function _message(address recipient, uint64 sourceNonce, bytes32 nonce, bytes32 sender, bytes32 burnToken)
@@ -126,6 +143,17 @@ contract CctpAdapterTest is Fixture {
         view
         returns (bytes memory)
     {
+        return _messageAtRevision(recipient, sourceNonce, nonce, sender, burnToken, 1);
+    }
+
+    function _messageAtRevision(
+        address recipient,
+        uint64 sourceNonce,
+        bytes32 nonce,
+        bytes32 sender,
+        bytes32 burnToken,
+        uint32 mappingRevision
+    ) internal view returns (bytes memory) {
         bytes memory header = abi.encodePacked(
             uint32(1),
             uint32(27),
@@ -147,7 +175,9 @@ contract CctpAdapterTest is Fixture {
             uint256(0),
             uint256(0)
         );
-        return bytes.concat(header, burn, abi.encodePacked(uint8(1), bytes20(recipient), sourceNonce));
+        return bytes.concat(
+            header, burn, abi.encodePacked(uint8(2), mappingRevision, bytes20(recipient), sourceNonce)
+        );
     }
 
     function _validMessage(bytes32 nonce, bytes32 sender) internal view returns (bytes memory) {
@@ -198,6 +228,63 @@ contract CctpAdapterTest is Fixture {
         bytes memory message = _message(bob, 4242, nonce, MINT_RECIPIENT, wrongToken);
         vm.expectRevert(TokenNotMapped.selector);
         adapter.receiveMessage(message, hex"51");
+    }
+
+    function test_wrong_domain_and_remote_messenger_fixtures_never_reach_the_transmitter() public {
+        transmitter.setShouldRevert(true);
+        bytes memory wrongDomain = _validMessage(keccak256("cctp wrong domain"), MINT_RECIPIENT);
+        wrongDomain[11] = bytes1(uint8(2));
+
+        vm.expectRevert(WrongDomain.selector);
+        adapter.receiveMessage(wrongDomain, hex"51");
+        assertEq(transmitter.calls(), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+
+        bytes memory wrongMessenger =
+            _validMessage(keccak256("cctp wrong messenger"), bytes32(uint256(0xdead)));
+        vm.expectRevert(UnexpectedRailContract.selector);
+        adapter.receiveMessage(wrongMessenger, hex"51");
+        assertEq(transmitter.calls(), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+        assertEq(router.claimCount(), 0);
+    }
+
+    function test_rehearsal_burns_then_recovers_a_recipient_bound_inbound_claim() public {
+        _fund(AMOUNT);
+        vm.prank(address(router));
+        adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
+
+        MockTokenMessenger.Burn memory burn = messenger.lastBurn();
+        assertEq(burn.amount, AMOUNT);
+        assertEq(burn.destinationDomain, STELLAR_DOMAIN);
+        assertEq(burn.mintRecipient, MINT_RECIPIENT);
+        assertEq(burn.burnToken, address(usdc));
+        assertEq(burn.hookData, _hook(AddressKind.Account, G_KEY, 0));
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(usdc.balanceOf(address(messenger)), AMOUNT);
+        assertEq(usdc.allowance(address(adapter), address(messenger)), 0);
+
+        usdc.setBlocked(bob, true);
+        bytes32 inboundNonce = keccak256("cctp rehearsal inbound");
+        bytes memory message = _validMessage(inboundNonce, MINT_RECIPIENT);
+        uint64 claimId = adapter.receiveMessage(message, hex"51");
+
+        assertEq(claimId, 1);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
+        assertEq(usdc.balanceOf(address(router)), AMOUNT);
+        assertEq(router.claimCount(), 1);
+        assertEq(uint256(router.claimFailureReason(claimId)), 1);
+        PendingClaim memory claim = router.pendingClaim(claimId);
+        assertEq(claim.recipient, bob);
+        assertEq(claim.token, address(usdc));
+        assertEq(claim.amount, AMOUNT);
+        assertEq(claim.sourceNonce, 4242);
+
+        usdc.setBlocked(bob, false);
+        router.settleClaim(claimId);
+        assertEq(usdc.balanceOf(bob), AMOUNT);
+        assertEq(usdc.balanceOf(address(router)), 0);
+        assertEq(usdc.balanceOf(address(adapter)), 0);
     }
 
     function test_constructor_refuses_a_zero_router() public {
@@ -262,25 +349,25 @@ contract CctpAdapterTest is Fixture {
         CctpAdapter fresh = new CctpAdapter(address(router), address(messenger), address(usdc), admin);
 
         vm.expectEmit(true, true, true, true, address(fresh));
-        emit LaneConfigured("solana", 5, MINT_RECIPIENT);
+        emit LaneConfigured("solana", 5, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7, 1);
         vm.expectEmit(true, true, true, true, address(fresh));
         emit LaneEnabled("solana", true);
 
         vm.prank(admin);
-        fresh.setLane("solana", 5, MINT_RECIPIENT);
+        fresh.setLane("solana", 5, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
     }
 
     function test_set_lane_refuses_a_chain_with_no_name() public {
         vm.prank(admin);
         vm.expectRevert(UnknownChain.selector);
-        adapter.setLane("", STELLAR_DOMAIN, MINT_RECIPIENT);
+        adapter.setLane("", STELLAR_DOMAIN, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
     }
 
     /// @dev A zero mint recipient is a burn into a hole. Circle would accept it.
     function test_set_lane_refuses_a_zero_mint_recipient() public {
         vm.prank(admin);
         vm.expectRevert(ZeroAddress.selector);
-        adapter.setLane("solana", 5, bytes32(0));
+        adapter.setLane("solana", 5, bytes32(0), REMOTE_STELLAR_USDC, 7);
     }
 
     /// @dev Once only, and this is the test that keeps it that way. Repointing a live lane moves
@@ -289,19 +376,35 @@ contract CctpAdapterTest is Fixture {
     function test_set_lane_refuses_a_second_configuration() public {
         vm.prank(admin);
         vm.expectRevert(AlreadyConfigured.selector);
-        adapter.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+        adapter.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
     }
 
     function test_set_lane_refuses_a_second_configuration_even_with_new_values() public {
         vm.prank(admin);
         vm.expectRevert(AlreadyConfigured.selector);
-        adapter.setLane(STELLAR, 99, G_KEY);
+        adapter.setLane(STELLAR, 99, G_KEY, REMOTE_STELLAR_USDC, 7);
+    }
+
+    function test_lane_mapping_migration_preserves_canonical_decimals_and_rejects_stale_requests() public {
+        Destination memory stale = _dest(G_ADDR);
+        vm.prank(admin);
+        adapter.setLaneMapping(STELLAR, REMOTE_STELLAR_USDC, 7, 2);
+
+        CctpAdapter.Lane memory migrated = adapter.laneOf(STELLAR);
+        assertEq(migrated.localDecimals, 6);
+        assertEq(migrated.remoteDecimals, 7);
+        assertEq(migrated.mappingRevision, 2);
+        assertEq(migrated.remoteToken, REMOTE_STELLAR_USDC);
+
+        vm.expectRevert(StaleMapping.selector);
+        adapter.checkDispatch(address(usdc), AMOUNT, stale);
+        assertEq(messenger.burnCount(), 0);
     }
 
     function test_set_lane_is_owner_only() public {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
-        adapter.setLane("solana", 5, MINT_RECIPIENT);
+        adapter.setLane("solana", 5, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
     }
 
     function test_set_lane_enabled_needs_a_lane_to_enable() public {
@@ -357,7 +460,7 @@ contract CctpAdapterTest is Fixture {
         assertEq(adapter.pendingOwner(), bob);
 
         vm.prank(admin);
-        adapter.setLane("solana", 5, MINT_RECIPIENT);
+        adapter.setLane("solana", 5, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
 
         vm.prank(bob);
         adapter.acceptOwnership();
@@ -371,7 +474,7 @@ contract CctpAdapterTest is Fixture {
 
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, bob));
-        adapter.setLane("solana", 5, MINT_RECIPIENT);
+        adapter.setLane("solana", 5, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
     }
 
     // -------------------------------------------------------------------------------------
@@ -402,7 +505,8 @@ contract CctpAdapterTest is Fixture {
 
     function test_dispatch_refuses_a_chain_with_no_lane() public {
         _fund(AMOUNT);
-        Destination memory destination = Destination({chain: "solana", strkey: G_ADDR});
+        Destination memory destination =
+            Destination({chain: "solana", strkey: G_ADDR, mappingRevision: 1, remoteDecimals: 7});
         vm.prank(address(router));
         vm.expectRevert(UnknownChain.selector);
         adapter.dispatch(address(usdc), AMOUNT, destination, NONCE);
@@ -425,8 +529,9 @@ contract CctpAdapterTest is Fixture {
     /// that trusts its caller more than this one does, still cannot burn into a typo.
     function test_dispatch_refuses_a_destination_that_fails_its_checksum() public {
         _fund(AMOUNT);
-        Destination memory destination =
-            Destination({chain: STELLAR, strkey: "GA5ZYIIVYDX5GRF2BKEQD2Y47ZCPG3HX3PUUNPVQ5ZECB57MJG7RLVNV"});
+        Destination memory destination = Destination({
+            chain: STELLAR, strkey: "not-a-stellar-strkey", mappingRevision: 1, remoteDecimals: 7
+        });
         vm.prank(address(router));
         vm.expectRevert(InvalidDestination.selector);
         adapter.dispatch(address(usdc), AMOUNT, destination, NONCE);
@@ -488,7 +593,7 @@ contract CctpAdapterTest is Fixture {
         adapter.dispatch(address(usdc), AMOUNT, _dest(G_ADDR), NONCE);
 
         bytes memory hookData = messenger.lastBurn().hookData;
-        assertEq(hookData.length, 34);
+        assertEq(hookData.length, 38);
         assertEq(hookData, _hook(AddressKind.Account, G_KEY, 0));
     }
 
@@ -498,7 +603,7 @@ contract CctpAdapterTest is Fixture {
         adapter.dispatch(address(usdc), AMOUNT, _dest(C_ADDR), NONCE);
 
         bytes memory hookData = messenger.lastBurn().hookData;
-        assertEq(hookData.length, 34);
+        assertEq(hookData.length, 38);
         assertEq(hookData, _hook(AddressKind.Contract, C_KEY, 0));
     }
 
@@ -511,7 +616,7 @@ contract CctpAdapterTest is Fixture {
         adapter.dispatch(address(usdc), AMOUNT, _dest(M_ADDR), NONCE);
 
         bytes memory hookData = messenger.lastBurn().hookData;
-        assertEq(hookData.length, 42);
+        assertEq(hookData.length, 46);
         assertEq(hookData, _hook(AddressKind.MuxedAccount, G_KEY, MUXED_ID));
     }
 
@@ -585,7 +690,7 @@ contract CctpAdapterTest is Fixture {
         DeafRouter deaf = new DeafRouter();
         CctpAdapter orphan = new CctpAdapter(address(deaf), address(messenger), address(usdc), admin);
         vm.prank(admin);
-        orphan.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+        orphan.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
 
         usdc.mint(address(orphan), AMOUNT);
         vm.deal(address(deaf), 1 ether);
@@ -708,7 +813,7 @@ contract CctpAdapterTest is Fixture {
             InconsistentApprovalToken asset = new InconsistentApprovalToken();
             CctpAdapter fresh = new CctpAdapter(address(router), address(messenger), address(asset), admin);
             vm.prank(admin);
-            fresh.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT);
+            fresh.setLane(STELLAR, STELLAR_DOMAIN, MINT_RECIPIENT, REMOTE_STELLAR_USDC, 7);
             asset.mint(address(fresh), AMOUNT);
             asset.setApprovalMode(mode);
             uint256 count = messenger.burnCount();
@@ -888,11 +993,11 @@ contract CctpAdapterTest is Fixture {
 
     /// @dev Built by hand rather than by calling the library the adapter calls, because a test
     /// that asks the encoder what the encoder produces proves only that it is deterministic.
-    /// Version one, then the kind tag, then the key, then the muxed id if there is one.
+    /// Version two, mapping revision one, then the kind tag, key and optional muxed id.
     function _hook(AddressKind kind, bytes32 key, uint64 muxedId) internal pure returns (bytes memory) {
         if (kind == AddressKind.MuxedAccount) {
-            return abi.encodePacked(uint8(1), uint8(kind), key, muxedId);
+            return abi.encodePacked(uint8(2), uint32(1), uint8(kind), key, muxedId);
         }
-        return abi.encodePacked(uint8(1), uint8(kind), key);
+        return abi.encodePacked(uint8(2), uint32(1), uint8(kind), key);
     }
 }

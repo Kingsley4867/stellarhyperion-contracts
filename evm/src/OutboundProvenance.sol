@@ -21,6 +21,7 @@ import {
     RouteDisabled,
     RouteIsPaused,
     SlippageExceeded,
+    StaleMapping,
     TokenDisabled,
     TokenNotMapped,
     TokenNotRegistered,
@@ -144,17 +145,17 @@ contract OutboundProvenance is RouterActionValidator {
         TokenConfig memory cfg = target.tokenConfig(request.token);
         if (!cfg.registered) revert TokenNotRegistered();
         if (!cfg.enabled) revert TokenDisabled();
+        if (
+            request.route == RouteKind.Cctp
+                && (request.destination.mappingRevision == 0
+                    || request.destination.remoteDecimals != request.destinationDecimals)
+        ) revert StaleMapping();
 
         (fee, net) = outboundAmounts(
-            request.amount,
-            target.feeBps(),
-            cfg.decimals,
-            request.destinationDecimals,
-            request.minDestinationAmount
+            request.amount, target.feeBps(), cfg.decimals, request.destinationDecimals, request.minDestinationAmount
         );
 
-        (bool blocked, uint256 observed, uint256 threshold) =
-            _breakerBlocked(request.token, net, target.flowWindow());
+        (bool blocked, uint256 observed, uint256 threshold) = _breakerBlocked(request.token, net, target.flowWindow());
         if (blocked) revert CircuitBreakerLatched(request.token, observed, threshold);
 
         adapterAddress = target.adapter(request.route);
@@ -165,12 +166,11 @@ contract OutboundProvenance is RouterActionValidator {
     }
 
     /// @notice Quote all four rails in their unchanged enum order.
-    function quoteAll(
-        address token,
-        uint256 amount,
-        Destination calldata destination,
-        uint8 destinationDecimals
-    ) external view returns (RouteQuote[] memory quotes) {
+    function quoteAll(address token, uint256 amount, Destination calldata destination, uint8 destinationDecimals)
+        external
+        view
+        returns (RouteQuote[] memory quotes)
+    {
         quotes = new RouteQuote[](4);
         for (uint256 i = 0; i < 4; ++i) {
             quotes[i] = quote(RouteKind(i), token, amount, destination, destinationDecimals);
@@ -222,16 +222,14 @@ contract OutboundProvenance is RouterActionValidator {
     }
 
     /// @notice Hash an additive fee authorization without changing legacy typed intent identities.
-    function hashTransferIntentWithRelayerFee(
-        TransferIntent calldata intent,
-        address feeToken,
-        uint256 charge
-    ) public view returns (bytes32) {
+    function hashTransferIntentWithRelayerFee(TransferIntent calldata intent, address feeToken, uint256 charge)
+        public
+        view
+        returns (bytes32)
+    {
         bytes32 structHash = keccak256(
             abi.encode(
-                keccak256(
-                    "RelayerFeeIntent(bytes32 transferIntentHash,address feeToken,uint256 maxRelayerCharge)"
-                ),
+                keccak256("RelayerFeeIntent(bytes32 transferIntentHash,address feeToken,uint256 maxRelayerCharge)"),
                 hashTransferIntent(intent),
                 feeToken,
                 charge
@@ -257,9 +255,8 @@ contract OutboundProvenance is RouterActionValidator {
         uint256 expectedNonce = IRouterQuoteState(ROUTER).intentNonce(intent.sender);
         if (intent.nonce != expectedNonce) revert IntentNonceMismatch(expectedNonce, intent.nonce);
         if (providerPayment > intent.maxProviderBudget) revert ProviderBudgetExceeded();
-        bytes32 digest = feeSigned
-            ? hashTransferIntentWithRelayerFee(intent, feeToken, charge)
-            : hashTransferIntent(intent);
+        bytes32 digest =
+            feeSigned ? hashTransferIntentWithRelayerFee(intent, feeToken, charge) : hashTransferIntent(intent);
         if (_recover(digest, signature) != intent.sender) revert InvalidSignature();
         if (charge == 0) {
             if (feeToken != address(0)) revert InvalidRelayerFee();
@@ -273,9 +270,10 @@ contract OutboundProvenance is RouterActionValidator {
     }
 
     function _domainSeparator() private view returns (bytes32) {
-        return keccak256(
-            abi.encode(EIP712_DOMAIN_TYPEHASH, _EIP712_NAME_HASH, _EIP712_VERSION_HASH, block.chainid, ROUTER)
-        );
+        return
+            keccak256(
+                abi.encode(EIP712_DOMAIN_TYPEHASH, _EIP712_NAME_HASH, _EIP712_VERSION_HASH, block.chainid, ROUTER)
+            );
     }
 
     function _recover(bytes32 digest, bytes calldata signature) private pure returns (address signer) {
@@ -284,10 +282,9 @@ contract OutboundProvenance is RouterActionValidator {
         bytes32 s = bytes32(signature[32:64]);
         uint8 v = uint8(signature[64]);
         if (v < 27) v += 27;
-        if (
-            (v != 27 && v != 28)
-                || uint256(s) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0
-        ) revert InvalidSignature();
+        if ((v != 27 && v != 28) || uint256(s) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0) {
+            revert InvalidSignature();
+        }
         signer = ecrecover(digest, v, r, s);
         if (signer == address(0)) revert InvalidSignature();
     }
@@ -299,11 +296,7 @@ contract OutboundProvenance is RouterActionValidator {
     /// @param route The rail being priced.
     /// @param destination Where the transfer is headed.
     /// @return The first reason this rail cannot carry the transfer, or `None`.
-    function _quoteRailBlocker(RouteKind route, Destination calldata destination)
-        private
-        view
-        returns (QuoteBlocker)
-    {
+    function _quoteRailBlocker(RouteKind route, Destination calldata destination) private view returns (QuoteBlocker) {
         IRouterQuoteState target = IRouterQuoteState(ROUTER);
         if (target.paused() || target.routePaused(route)) return QuoteBlocker.Paused;
         if (!target.routeEnabled(route)) return QuoteBlocker.RouteDisabled;
@@ -416,8 +409,8 @@ contract OutboundProvenance is RouterActionValidator {
         v.requestedAmount = amount;
         TokenConfig memory cfg = target.tokenConfig(token);
         if (
-            !cfg.registered || amount == 0 || amount > type(uint128).max
-                || cfg.decimals > AmountMath.MAX_DECIMALS || destinationDecimals > AmountMath.MAX_DECIMALS
+            !cfg.registered || amount == 0 || amount > type(uint128).max || cfg.decimals > AmountMath.MAX_DECIMALS
+                || destinationDecimals > AmountMath.MAX_DECIMALS
         ) return v;
         v.fee = (amount * target.feeBps()) / AmountMath.BPS_DENOMINATOR;
         v.netAmount = AmountMath.floorToRepresentable(amount - v.fee, cfg.decimals, destinationDecimals);

@@ -28,13 +28,17 @@ import { TokenMappingConflict } from "../src/tokenMapping.js";
 import { AddressKind } from "../src/addresses.js";
 import {
   BURN_MESSAGE_VERSION,
+  CCTP_HOOK_VERSION,
+  CCTP_OUTBOUND_NOTE_LEN,
   FINALITY_THRESHOLD_FINALIZED,
-  HOOK_VERSION,
   MESSAGE_VERSION,
   STELLAR_DOMAIN,
 } from "../src/cctp.js";
 import { MAX_DECIMALS, MAX_FEE_BPS } from "../src/amounts.js";
 import { NOTE_VERSION, OUTBOUND_NOTE_LEN } from "../src/notes.js";
+import { WIRE_SCHEMAS } from "../src/wire-compat.js";
+import { abiSignature, compareAbiSets } from "../src/abi-compat.js";
+import type { AbiEntry } from "../src/abi-compat.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(here, "..");
@@ -466,6 +470,26 @@ describe("the documented inbound trust surface", () => {
       "EVM timelock delay",
     );
     requireEvidence(
+      solidityFunction(read(join(evmRoot, "src", "RouterActionValidator.sol")), "actionStatus"),
+      /block\.timestamp\s*<\s*queued\.eta[\s\S]*block\.timestamp\s*>\s*queued\.expiresAt/,
+      "EVM typed timelock boundary status",
+    );
+    requireEvidence(
+      solidityFunction(read(join(evmRoot, "src", "RouterActionValidator.sol")), "actionStatus"),
+      /keccak256\(abi\.encode\(queued\.action\)\)/,
+      "EVM timelock payload identity",
+    );
+    requireEvidence(
+      solidityFunction(evmRouter, "actionStatus"),
+      /_forwardProvenance\(\)/,
+      "EVM typed status forwards through the shared immutable helper",
+    );
+    requireEvidence(
+      solidityFunction(evmRouter, "_forwardProvenance"),
+      /address\(OUTBOUND_PROVENANCE\)[\s\S]*calldatacopy[\s\S]*staticcall[\s\S]*returndatacopy/,
+      "EVM typed status forwards the immutable helper schema",
+    );
+    requireEvidence(
       read(join(evmTest, "Fixture.sol")),
       /target\.executeAction\(id\)/,
       "EVM fixture timelock path",
@@ -522,6 +546,48 @@ describe("the deterministic provider fault fixtures", () => {
     expect(solidity).toMatch(/function _nextProviderFault\(uint8 stage\)/);
     expect(rehearsal).toMatch(/HYPERION_FAULT_SEED=\"\$\{HYPERION_FAULT_SEED:-156\}\"/);
     expect(rehearsal).toMatch(/deterministic provider fault schedule/);
+  });
+});
+
+describe("the hostile Soroban token and receiver fixtures", () => {
+  const variants = (source: string, name: string): string[] => {
+    const body = new RegExp(`pub enum ${name}\\s*\\{([^}]*)\\}`, "s").exec(source)?.[1] ?? "";
+    return [...body.matchAll(/^\s*([A-Z]\w*)\s*[,(]/gm)].map((m) => m[1]!);
+  };
+
+  it("documents every fixture mode the Soroban source declares, and no others", () => {
+    const fixtures = read(join(sorobanRouterSrc, "test", "hostile.rs"));
+    const doc = read(join(repoRoot, "docs", "HOSTILE_FIXTURES.md"));
+    for (const [name, expected] of [
+      [
+        "Hostility",
+        ["Honest", "Frozen", "ShortCredit", "ExtraDebit", "RequireCosigner", "Reenter"],
+      ],
+      [
+        "ReceiverMode",
+        ["Honest", "SkipAuthorization", "AuthorizeAmount", "ReplayInSameInvocation"],
+      ],
+      ["Reentry", ["SettleClaim", "BridgeOut"]],
+    ] as const) {
+      expect(variants(fixtures, name), name).toEqual(expected);
+      for (const variant of expected) expect(doc, `${name}::${variant}`).toContain(`\`${variant}`);
+    }
+    // Determinism is a documented property; the fixture must not consult ledger time or a PRNG.
+    expect(fixtures).not.toMatch(/ledger\(\)|prng\(\)/);
+    expect(read(join(repoRoot, "docs", "README.md"))).toContain("HOSTILE_FIXTURES.md");
+  });
+
+  it("keeps the boundary suite on the real router entry points and the shared rollback books", () => {
+    const suite = read(join(sorobanRouterSrc, "test", "hostile_boundaries.rs"));
+    const modules = read(join(sorobanRouterSrc, "test", "mod.rs"));
+    expect(modules).toMatch(/^mod hostile;$/m);
+    expect(modules).toMatch(/^mod hostile_boundaries;$/m);
+    for (const call of ["try_bridge_out(", "try_deliver(", "try_settle_claim(", "set_auths(&[])"]) {
+      expect(suite, call).toContain(call);
+    }
+    for (const field of ["treasury", "nonce", "dispatches", "flow", "claims", "outstanding"]) {
+      expect(suite, field).toMatch(new RegExp(`^\\s*${field}: `, "m"));
+    }
   });
 });
 
@@ -617,7 +683,7 @@ describe("the constants both chains agree on", () => {
     expect(source).toMatch(/VERSION_MUXED[^=]*=\s*12\s*<<\s*3/);
   });
 
-  it("has the same CCTP offsets and constants in the Rust", () => {
+  it("has the same CCTP offsets and revision-bound wire formats across Rust and Solidity", () => {
     const source = read(join(coreSrc, "cctp.rs"));
     const expectConst = (name: string, value: number): void => {
       const match = new RegExp(`${name}\\s*:\\s*[a-z0-9]+\\s*=\\s*(\\d+)`).exec(source);
@@ -628,9 +694,53 @@ describe("the constants both chains agree on", () => {
     expectConst("MESSAGE_VERSION", MESSAGE_VERSION);
     expectConst("BURN_MESSAGE_VERSION", BURN_MESSAGE_VERSION);
     expectConst("FINALITY_THRESHOLD_FINALIZED", FINALITY_THRESHOLD_FINALIZED);
-    expectConst("HOOK_VERSION", HOOK_VERSION);
+    expectConst("HOOK_VERSION", CCTP_HOOK_VERSION);
+    expectConst("CCTP_OUTBOUND_NOTE_LEN", CCTP_OUTBOUND_NOTE_LEN);
     expectConst("MSG_BODY", 148);
     expectConst("BURN_HOOK_DATA", 228);
+
+    const solidity = read(join(evmRoot, "src", "libraries", "HyperionNotes.sol"));
+    expect(solidity).toMatch(new RegExp(`CCTP_HOOK_VERSION\\s*=\\s*${String(CCTP_HOOK_VERSION)}`));
+    expect(solidity).toMatch(
+      new RegExp(`CCTP_OUTBOUND_NOTE_LEN\\s*=\\s*${String(CCTP_OUTBOUND_NOTE_LEN)}`),
+    );
+  });
+
+  it("registers the same CCTP and note offsets as the Rust, field for field", () => {
+    // The compatibility report is only as good as the registry it compares, so the registry's
+    // offsets are pinned to the Rust constants rather than to the TypeScript parsers alone.
+    const cctp = read(join(coreSrc, "cctp.rs"));
+    const axelar = read(join(coreSrc, "axelar.rs"));
+    const rustConst = (source: string, name: string): number => {
+      const match = new RegExp(`const ${name}\\s*:\\s*[a-z0-9]+\\s*=\\s*(\\d+)`).exec(source);
+      expect(match, `${name} not found`).not.toBeNull();
+      return Number(match?.[1]);
+    };
+    const offsets = (id: string): Record<string, number> => {
+      const schema = WIRE_SCHEMAS.schemas.find((s) => s.id === id);
+      if (schema?.kind !== "message") throw new Error(`no ${id} schema`);
+      return Object.fromEntries(
+        schema.fields.flatMap((f) => (typeof f.offset === "number" ? [[f.name, f.offset]] : [])),
+      );
+    };
+    const snake = (name: string) => name.replace(/[A-Z]/g, (c) => `_${c}`).toUpperCase();
+    const header = offsets("cctp.header");
+    const headerNames: Record<string, string> = {
+      minFinalityThreshold: "MIN_FINALITY",
+      finalityThresholdExecuted: "FINALITY_EXECUTED",
+    };
+    for (const [name, offset] of Object.entries(header)) {
+      expect(offset, name).toBe(rustConst(cctp, `MSG_${headerNames[name] ?? snake(name)}`));
+    }
+    const burnNames: Record<string, string> = { burnToken: "TOKEN", hookData: "HOOK_DATA" };
+    for (const [name, offset] of Object.entries(offsets("cctp.burn"))) {
+      expect(offset, name).toBe(rustConst(cctp, `BURN_${burnNames[name] ?? snake(name)}`));
+    }
+    const outbound = WIRE_SCHEMAS.schemas.find((s) => s.id === "note.outbound");
+    expect(outbound?.kind === "message" ? outbound.size : null).toEqual({
+      kind: "fixed",
+      bytes: rustConst(axelar, "OUTBOUND_NOTE_LEN"),
+    });
   });
 
   it("has the same note layout in the Rust", () => {
@@ -662,6 +772,69 @@ describe("the constants both chains agree on", () => {
   });
 });
 
+describe("payout-relevant ABI compatibility", () => {
+  const baseline = [
+    {
+      type: "function",
+      name: "settleClaim",
+      stateMutability: "nonpayable",
+      inputs: [
+        { name: "id", type: "uint64" },
+        { name: "amount", type: "uint256" },
+        { name: "recipient", type: "address" },
+        { name: "nonce", type: "bytes32" },
+      ],
+      outputs: [],
+    },
+    {
+      type: "event",
+      name: "ClaimSettled",
+      inputs: [
+        { name: "id", type: "uint64", indexed: true },
+        { name: "recipient", type: "address", indexed: true },
+        { name: "amount", type: "uint256", indexed: false },
+      ],
+    },
+  ] as const satisfies readonly AbiEntry[];
+
+  it("fails removed and reordered payout fields", () => {
+    const removed = [{ ...baseline[0], inputs: baseline[0].inputs.slice(0, 3) }];
+    expect(compareAbiSets(baseline, removed).result).toBe("breaking");
+
+    const reordered = [
+      {
+        ...baseline[0],
+        inputs: [
+          baseline[0].inputs[0],
+          baseline[0].inputs[2],
+          baseline[0].inputs[1],
+          baseline[0].inputs[3],
+        ],
+      },
+    ];
+    expect(compareAbiSets(baseline, reordered).result).toBe("breaking");
+  });
+
+  it("assesses additive ABI entries as migration work rather than activation", () => {
+    const additive: readonly AbiEntry[] = [
+      ...baseline,
+      {
+        type: "event",
+        name: "ClaimSettledV2",
+        inputs: [...baseline[1].inputs, { name: "migration", type: "bytes32", indexed: false }],
+      },
+    ];
+    const report = compareAbiSets(baseline, additive);
+    expect(report.result).toBe("compatible");
+    expect(report.decisions[0]?.rule).toBe("entry-added");
+  });
+
+  it("uses canonical signatures for tuple and event layout comparisons", () => {
+    expect(abiSignature(baseline[0])).toBe("settleClaim(uint64,uint256,address,bytes32)");
+    expect(abiSignature(baseline[1])).toBe("ClaimSettled(uint64,address,uint256)");
+  });
+});
+
 describe("the generated ABI modules", () => {
   it("is exactly what the generator produces right now", () => {
     // Regenerate and compare, rather than trusting that somebody ran it. Editing a generated
@@ -672,7 +845,7 @@ describe("the generated ABI modules", () => {
       stdio: "pipe",
     });
     expect(snapshotAbiDir()).toEqual(before);
-  });
+  }, 30_000);
 
   it("exports an ABI for every contract the app has to talk to", () => {
     const abiDir = join(packageRoot, "src", "abi");

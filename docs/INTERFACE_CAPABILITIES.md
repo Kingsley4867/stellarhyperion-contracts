@@ -126,3 +126,18 @@ cd packages/protocol && npm run check
 `script/anvil-e2e.sh` also checks a live local deployment against the EVM snapshots: every
 advertised router route must have an adapter, and each deployed adapter must report its recorded
 route.
+
+## ABI, tuple and event compatibility policy
+
+Payout-relevant ABI signatures and layouts have a strict compatibility gate. The baseline is the
+compiled contract ABI and emitted event shapes, linked to the same Foundry artifacts used by
+`packages/protocol/scripts/gen-artifacts.mjs`. A removal or reordering of amount, recipient,
+nonce/replay or payout tuple fields is breaking and fails parity. Additive entries and tuple fields
+are compatible only after a documented consumer migration assessment covering indexers, decoders,
+and transaction/replay consumers.
+
+The active deployment remains Stellar Testnet outbound ITS/CCTP. EVM and other rail surfaces remain
+`gated` in the capability snapshots until independently validated. Never interpret an ABI change as
+activation evidence. Event and tuple changes require a versioned schema or migration record; exact
+integer values must remain exact, rail dispatch authenticated, replay state protected, and claims
+bound to their recorded recipient.

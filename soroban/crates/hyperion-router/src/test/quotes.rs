@@ -53,6 +53,7 @@ fn the_numbers_in_a_quote_are_the_numbers_the_transfer_actually_uses() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: evm_destination(&w.env, 0x11),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,
@@ -238,6 +239,7 @@ fn headroom_in_a_quote_shrinks_as_the_window_fills_up() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: evm_destination(&w.env, 0x12),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,

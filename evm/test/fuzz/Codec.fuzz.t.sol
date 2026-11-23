@@ -331,8 +331,8 @@ contract CodecFuzzTest is Test {
         AddressKind kind = _kind(kindSeed);
         bytes memory hook = notes.encodeCctpHook(kind, key, muxedId);
 
-        assertEq(hook, abi.encodePacked(uint8(1), strkey.tagged(kind, key, muxedId)));
-        assertEq(hook.length, kind == AddressKind.MuxedAccount ? 42 : 34);
+        assertEq(hook, abi.encodePacked(uint8(2), uint32(1), strkey.tagged(kind, key, muxedId)));
+        assertEq(hook.length, kind == AddressKind.MuxedAccount ? 46 : 38);
     }
 
     // -------------------------------------------------------------------------------------

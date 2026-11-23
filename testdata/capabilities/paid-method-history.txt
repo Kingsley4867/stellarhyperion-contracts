@@ -4,6 +4,7 @@
 paid-method soroban/router bridge_out_bounded
 paid-method soroban/router bridge_out_with_gas
 paid-method soroban/cctp-adapter dispatch_from
+paid-method soroban/cctp-adapter dispatch_from_revision
 paid-method soroban/axelar-adapter dispatch_from
 paid-method evm/router bridgeOut
 paid-method evm/router bridgeOutBounded

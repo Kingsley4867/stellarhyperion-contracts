@@ -35,6 +35,7 @@ contract RouterProvenanceConservationTest is Fixture {
             OutboundRequest memory request = _usdcRequest(1_000_003);
             request.route = route;
             request.destinationDecimals = 4;
+            request.destination.remoteDecimals = 4;
             // Same sender and recipient must be counted once in the conservation total.
             BalanceSnapshot memory before_ = _snapshot(alice, alice);
             vm.prank(alice);

@@ -88,7 +88,7 @@ contract Deploy is DeployConfig {
 
         // Once only, and the one that matters most. The mint recipient is who Circle credits on
         // the far side, so a wrong value here is a burn on this chain against a mint nobody owns.
-        cctp.setLane(stellarChain(), STELLAR_CCTP_DOMAIN, stellarRailRecipient());
+        cctp.setLane(stellarChain(), STELLAR_CCTP_DOMAIN, stellarRailRecipient(), stellarCctpToken(), 7);
         console.log("cctp lane           ", stellarChain());
 
         if (axelarToo) {
@@ -257,6 +257,10 @@ contract Deploy is DeployConfig {
         vm.serializeAddress(key, "cctpTokenMessenger", rails.cctpTokenMessenger);
         vm.serializeAddress(key, "cctpMessageTransmitter", rails.cctpMessageTransmitter);
         vm.serializeBytes32(key, "stellarRailRecipient", stellarRailRecipient());
+        vm.serializeBytes32(key, "stellarCctpToken", stellarCctpToken());
+        vm.serializeUint(key, "cctpMappingRevision", 1);
+        vm.serializeUint(key, "cctpLocalDecimals", token.decimals);
+        vm.serializeUint(key, "cctpRemoteDecimals", 7);
 
         if (axelarToo) {
             vm.serializeAddress(key, "axelarAdapter", address(axelar));

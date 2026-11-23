@@ -58,8 +58,8 @@ mod test;
 use hyperion_core::{
     address::assert_route_supports,
     cctp::{
-        self, BurnMessage, CctpMessage, HyperionHook, DEFAULT_ROTATION_OVERLAP_WINDOW,
-        MIN_PEER_ROTATION_DELAY,
+        self, BurnMessage, CctpMessage, CctpOutboundNote, HyperionHook,
+        DEFAULT_ROTATION_OVERLAP_WINDOW, MIN_PEER_ROTATION_DELAY,
     },
     codec,
     inbound::{Origin, Recipient, RouterClient},
@@ -127,21 +127,27 @@ impl CctpAdapter {
     // ---------------------------------------------------------------------------------------
 
     // Shares all local dispatch checks; provider execution/balances still require simulation.
-    pub fn check_dispatch(
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_dispatch_revision(
         env: Env,
         caller: Address,
-        _token: Address,
+        token: Address,
         amount: i128,
         destination_chain: String,
         destination: BytesN<32>,
+        mapping_revision: u32,
+        destination_decimals: u32,
         gas_amount: Option<i128>,
     ) -> Result<(), HyperionError> {
         validate_dispatch(
             &env,
             &caller,
+            &token,
             amount,
             &destination_chain,
             &destination,
+            mapping_revision,
+            destination_decimals,
             gas_amount,
         )?;
         Ok(())
@@ -152,22 +158,28 @@ impl CctpAdapter {
     /// The router is the only caller. It has already taken its fee, floored the amount to
     /// something the far side can represent, charged the flow limit and moved the money, so by
     /// the time this runs the adapter is holding exactly what needs to cross.
-    pub fn dispatch(
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_revision(
         env: Env,
         caller: Address,
         token: Address,
         amount: i128,
         destination_chain: String,
         destination: BytesN<32>,
+        mapping_revision: u32,
+        destination_decimals: u32,
         nonce: u64,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
         let (cfg, domain, _, finality_threshold) = validate_dispatch(
             &env,
             &caller,
+            &token,
             amount,
             &destination_chain,
             &destination,
+            mapping_revision,
+            destination_decimals,
             None,
         )?;
 
@@ -183,7 +195,13 @@ impl CctpAdapter {
         let asset = token::Client::new(&env, &token);
         let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
 
-        TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn(
+        let hook = CctpOutboundNote {
+            mapping_revision,
+            recipient: destination.clone(),
+            router_nonce: nonce,
+        }
+        .encode(&env)?;
+        TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn_with_hook(
             &this,
             &amount,
             &domain,
@@ -192,6 +210,7 @@ impl CctpAdapter {
             &storage::destination_caller(&env, domain),
             &max_fee,
             &finality_threshold,
+            &hook,
         );
 
         close_approval(
@@ -210,6 +229,7 @@ impl CctpAdapter {
             mint_recipient: destination,
             max_fee,
             min_finality_threshold: finality_threshold,
+            mapping_revision,
             router_nonce: nonce,
         }
         .publish(&env);
@@ -224,7 +244,7 @@ impl CctpAdapter {
     /// The caller supplies a live fee budget, in Stellar token base units. No persistent
     /// allowance or operator fee policy can widen the amount the user authorized.
     #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_from(
+    pub fn dispatch_from_revision(
         env: Env,
         caller: Address,
         sender: Address,
@@ -233,6 +253,8 @@ impl CctpAdapter {
         destination_chain: String,
         destination: BytesN<32>,
         nonce: u64,
+        mapping_revision: u32,
+        destination_decimals: u32,
         gas_amount: i128,
     ) -> Result<(), HyperionError> {
         caller.require_auth();
@@ -240,9 +262,12 @@ impl CctpAdapter {
         let (cfg, domain, destination_caller, finality_threshold) = validate_dispatch(
             &env,
             &caller,
+            &token,
             amount,
             &destination_chain,
             &destination,
+            mapping_revision,
+            destination_decimals,
             Some(gas_amount),
         )?;
         let this = env.current_contract_address();
@@ -257,7 +282,8 @@ impl CctpAdapter {
             amount,
         )?;
         let allowance_before = open_approval(&env, &asset, &this, &cfg.token_messenger, amount)?;
-        // Circle's version-zero forwarding hook: 24-byte magic, version 0, payload length 0.
+        // Circle's fixed v0 forwarding hook carries no mapping revision; validate the request
+        // before burn, and do not append application bytes to this provider-defined payload.
         let mut hook = [0u8; 32];
         hook[..12].copy_from_slice(b"cctp-forward");
         TokenMessengerClient::new(&env, &cfg.token_messenger).deposit_for_burn_with_hook(
@@ -286,6 +312,7 @@ impl CctpAdapter {
             mint_recipient: destination,
             max_fee: gas_amount,
             min_finality_threshold: finality_threshold,
+            mapping_revision,
             router_nonce: nonce,
         }
         .publish(&env);
@@ -370,8 +397,9 @@ impl CctpAdapter {
         let remote_sender = storage::remote_sender(&env, msg.source_domain)
             .ok_or(HyperionError::RailNotConfigured)?;
         cctp::verify_remote_sender(&remote_sender, &burn.message_sender)?;
-        let token = storage::asset(&env, msg.source_domain, &burn.burn_token)
+        let mapping = storage::token_mapping(&env, msg.source_domain, &burn.burn_token)
             .ok_or(HyperionError::TokenNotMapped)?;
+        let token = mapping.local.clone();
 
         // Peer messenger validation on the source domain
         let active_peer = storage::peer_messenger(&env, msg.source_domain)
@@ -423,6 +451,11 @@ impl CctpAdapter {
         // adapter that has already burned its counterpart on the far side.
         let hook_data = BurnMessage::hook_data(&body)?;
         let hook = HyperionHook::decode(&env, &hook_data)?;
+        if hook.mapping_revision != mapping.revision
+            || token::Client::new(&env, &token).decimals() != mapping.local_decimals
+        {
+            return Err(HyperionError::StaleMapping);
+        }
         assert_route_supports(RouteKind::Cctp, hook.kind())?;
         let recipient = hook.destination.to_address(&env)?;
 
@@ -489,6 +522,7 @@ impl CctpAdapter {
             recipient,
             claim_id,
             relayer,
+            mapping_revision: mapping.revision,
         }
         .publish(&env);
         Ok(claim_id)
@@ -556,7 +590,12 @@ impl CctpAdapter {
                 .len()
                 .saturating_add(peer_domains.len())
                 .saturating_mul(3)
-                .saturating_add(peer_domains.len().saturating_mul(remote_tokens.len()))
+                .saturating_add(
+                    peer_domains
+                        .len()
+                        .saturating_mul(remote_tokens.len())
+                        .saturating_mul(3),
+                )
                 > MAX_MAINTENANCE_BATCH
             || !tokens.is_empty()
             || !inbound_messages.is_empty()
@@ -589,7 +628,7 @@ impl CctpAdapter {
             token_mappings_touched,
             peer_trust_touched,
             inbound_records_touched: 0,
-            total_keys_touched: peer_trust_touched + token_mappings_touched,
+            total_keys_touched: peer_trust_touched + token_mappings_touched.saturating_mul(3),
         })
     }
 
@@ -600,7 +639,7 @@ impl CctpAdapter {
             has_token_mappings: true,
             has_peer_trust: true,
             has_inbound_records: false,
-            token_mapping_keys: 1,
+            token_mapping_keys: 3,
             peer_trust_keys: 3,
             inbound_record_keys: 0,
         })
@@ -660,16 +699,42 @@ impl CctpAdapter {
         domain: u32,
         burn_token: BytesN<32>,
         local: Address,
+        local_decimals: u32,
+        remote_decimals: u32,
+        revision: u32,
     ) -> Result<(), HyperionError> {
         require_admin(&env)?;
         if storage::chain_of(&env, domain).is_none() {
             return Err(HyperionError::UnknownChain);
         }
-        storage::set_asset(&env, domain, &burn_token, &local);
+        if revision == 0 || local_decimals > 38 || remote_decimals > 38 {
+            return Err(HyperionError::InvalidDecimals);
+        }
+        if token::Client::new(&env, &local).decimals() != local_decimals {
+            return Err(HyperionError::InvalidDecimals);
+        }
+        match storage::token_mapping(&env, domain, &burn_token) {
+            Some(previous) if revision <= previous.revision => {
+                return Err(HyperionError::StaleMapping);
+            }
+            None if revision != 1 => return Err(HyperionError::StaleMapping),
+            _ => {}
+        }
+        let mapping = types::TokenMapping {
+            local: local.clone(),
+            remote: burn_token.clone(),
+            revision,
+            local_decimals,
+            remote_decimals,
+        };
+        storage::set_asset(&env, domain, &mapping);
         events::AssetMapped {
             domain,
             burn_token,
             local,
+            revision,
+            local_decimals,
+            remote_decimals,
         }
         .publish(&env);
         Ok(())
@@ -1023,6 +1088,14 @@ impl CctpAdapter {
         storage::asset(&env, domain, &burn_token).ok_or(HyperionError::TokenNotMapped)
     }
 
+    pub fn mapping_for(
+        env: Env,
+        domain: u32,
+        remote_token: BytesN<32>,
+    ) -> Result<types::TokenMapping, HyperionError> {
+        storage::token_mapping(&env, domain, &remote_token).ok_or(HyperionError::TokenNotMapped)
+    }
+
     pub fn is_domain_disabled(env: Env, domain: u32) -> Result<bool, HyperionError> {
         let _ = storage::config(&env)?;
         Ok(storage::is_domain_disabled(&env, domain))
@@ -1214,12 +1287,16 @@ fn contract_at(env: &Env, raw: &BytesN<32>) -> Address {
     Address::from_string(&codec::contract_strkey(env, &raw.to_array()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_dispatch(
     env: &Env,
     caller: &Address,
+    token: &Address,
     amount: i128,
     chain: &String,
     destination: &BytesN<32>,
+    mapping_revision: u32,
+    destination_decimals: u32,
     gas_amount: Option<i128>,
 ) -> Result<(Config, u32, BytesN<32>, u32), HyperionError> {
     let cfg = storage::config(env)?;
@@ -1233,6 +1310,14 @@ fn validate_dispatch(
         return Err(HyperionError::InvalidAmount);
     }
     let domain = storage::domain_of(env, chain).ok_or(HyperionError::UnknownChain)?;
+    let mapping =
+        storage::local_token_mapping(env, domain, token).ok_or(HyperionError::TokenNotMapped)?;
+    if mapping.revision != mapping_revision
+        || mapping.remote_decimals != destination_decimals
+        || token::Client::new(env, token).decimals() != mapping.local_decimals
+    {
+        return Err(HyperionError::StaleMapping);
+    }
     if storage::is_domain_disabled(env, domain) {
         return Err(HyperionError::RouteDisabled);
     }

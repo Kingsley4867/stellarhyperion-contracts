@@ -34,6 +34,14 @@ require_tools() {
   done
 }
 
+is_dry_run() {
+  [ "${HYPERION_DRY_RUN:-0}" = "1" ]
+}
+
+require_unsigned_plan() {
+  is_dry_run || die "this planning helper requires HYPERION_DRY_RUN=1"
+}
+
 require_identity() {
   stellar keys address "$IDENTITY" >/dev/null 2>&1 \
     || die "no identity called $IDENTITY. Create one with:

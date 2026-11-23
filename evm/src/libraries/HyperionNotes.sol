@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {MalformedMessage, NotEvmAddress, UnsupportedHookVersion, ZeroAddressKey} from "../HyperionErrors.sol";
+import {
+    MalformedMessage,
+    NotEvmAddress,
+    StaleMapping,
+    UnsupportedHookVersion,
+    ZeroAddressKey
+} from "../HyperionErrors.sol";
 import {AddressKind} from "../HyperionTypes.sol";
 import {StellarAddress} from "./StellarAddress.sol";
 
@@ -29,6 +35,8 @@ library HyperionNotes {
     /// its payloads differently from the other.
     uint8 internal constant NOTE_VERSION = 1;
     uint8 internal constant NOTE_VERSION_V1 = NOTE_VERSION;
+    uint8 internal constant CCTP_HOOK_VERSION = 2;
+    uint256 internal constant CCTP_OUTBOUND_NOTE_LEN = 33;
 
     /// @dev Version, twenty byte address, eight byte nonce.
     uint256 internal constant OUTBOUND_NOTE_LEN = 29;
@@ -75,6 +83,23 @@ library HyperionNotes {
         recipient = address(bytes20(payload[1:21]));
         if (recipient == address(0)) revert ZeroAddressKey();
         nonce = uint64(bytes8(payload[21:29]));
+    }
+
+    /// @notice Read the revision-bound CCTP note sent from Stellar to EVM.
+    /// @dev Wire form is `[version][mapping revision][20 byte recipient][8 byte nonce]`.
+    function decodeCctpOutboundNote(bytes calldata payload)
+        internal
+        pure
+        returns (address recipient, uint64 nonce, uint32 mappingRevision)
+    {
+        if (payload.length != CCTP_OUTBOUND_NOTE_LEN || uint8(payload[0]) != CCTP_HOOK_VERSION) {
+            revert MalformedMessage();
+        }
+        mappingRevision = uint32(bytes4(payload[1:5]));
+        if (mappingRevision == 0) revert StaleMapping();
+        recipient = address(bytes20(payload[5:25]));
+        if (recipient == address(0)) revert ZeroAddressKey();
+        nonce = uint64(bytes8(payload[25:33]));
     }
 
     /// @notice Write the note that goes with a transfer into Stellar.
@@ -135,20 +160,22 @@ library HyperionNotes {
     }
 
     /// @notice The hook a CCTP burn carries so the far side knows who the USDC is for.
-    /// @dev Wire form is `[version][tagged destination]`, which is what
-    /// `hyperion_core::cctp::HyperionHook::decode` reads. Thirty four bytes, or forty two for a
+    /// @dev Wire form is `[version][mapping revision][tagged destination]`, which is what
+    /// `hyperion_core::cctp::HyperionHook::decode` reads. Thirty eight bytes, or forty six for a
     /// muxed destination.
     ///
     /// CCTP's mint recipient is a bare thirty two byte slot with no room for a type tag, and a
     /// bridge cannot tell a contract id from an account key by looking at it. So the mint
     /// recipient names Hyperion's own adapter on the far side and the real destination rides in
     /// here, where there is room to say which of the three kinds it is.
-    function encodeCctpHook(AddressKind kind, bytes32 key, uint64 muxedId)
+    function encodeCctpHook(AddressKind kind, bytes32 key, uint64 muxedId, uint32 mappingRevision)
         internal
         pure
         returns (bytes memory)
     {
-        return abi.encodePacked(NOTE_VERSION, StellarAddress.tagged(kind, key, muxedId));
+        if (mappingRevision == 0) revert StaleMapping();
+        bytes memory tagged = StellarAddress.tagged(kind, key, muxedId);
+        return abi.encodePacked(CCTP_HOOK_VERSION, mappingRevision, tagged);
     }
 
     /// @notice Read a thirty two byte word as an EVM address, or refuse to.

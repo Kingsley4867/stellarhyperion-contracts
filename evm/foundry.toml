@@ -46,6 +46,10 @@ fs_permissions = [
 # line nobody can read at a glance. That is the wrong thing to buy a hundred gas with.
 exclude_lints = [
   "asm-keccak256",
+  # Timelock and attestation expiry checks intentionally compare against block timestamps.
+  # The contracts use these comparisons for short-lived deadlines and bounded governance windows,
+  # not as a source of chain-wide price or randomness data.
+  "block-timestamp",
   # Reading and writing the deployment record is what a deploy script is for. The lint is right
   # that `readFile` and `writeJson` reach outside the EVM, and `fs_permissions` above is the
   # answer to that: writes stay in ./deployments; the shared test corpus is read-only. Silencing it per line

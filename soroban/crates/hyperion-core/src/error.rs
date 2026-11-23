@@ -122,4 +122,6 @@ pub enum HyperionError {
     BatchLimitExceeded = 57,
     /// The transfer amount exceeds the destination-specific flow limit for this window.
     DestinationFlowLimitExceeded = 58,
+    // A dispatch request or message names a token mapping generation that is no longer active.
+    StaleMapping = 59,
 }

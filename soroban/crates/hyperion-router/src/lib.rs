@@ -25,7 +25,10 @@ mod types;
 #[cfg(test)]
 mod test;
 
-pub use adapter::{PaidRailAdapter, PaidRailAdapterClient, RailAdapter, RailAdapterClient};
+pub use adapter::{
+    CctpRailAdapter, CctpRailAdapterClient, PaidRailAdapter, PaidRailAdapterClient, RailAdapter,
+    RailAdapterClient,
+};
 pub use storage::DataKey;
 pub use timelock::{GRACE_PERIOD, MAX_TIMELOCK_DELAY, MIN_TIMELOCK_DELAY};
 pub use types::{
@@ -43,8 +46,8 @@ use hyperion_core::{
     flow, HyperionError, RouteKind, MAX_FEE_BPS,
 };
 use soroban_sdk::{
-    contract, contractimpl, token, vec, Address, BytesN, Env, EnvBase, IntoVal, String, TryFromVal,
-    Vec,
+    contract, contractimpl, token, vec, Address, BytesN, Env, EnvBase, IntoVal, String, Symbol,
+    TryFromVal, Val, Vec,
 };
 
 // Every rail Hyperion knows how to speak, in the order the app shows them.
@@ -1101,7 +1104,7 @@ fn quote_breakdown_value(
             env.vec_new_from_slice(&[tag, encoded]).unwrap().into()
         }
         None => {
-            let tag: soroban_sdk::Val = soroban_sdk::Symbol::new(env, "Unavailable").into_val(env);
+            let tag: soroban_sdk::Val = method_symbol(env, "Unavailable").into_val(env);
             env.vec_new_from_slice(&[tag]).unwrap().into()
         }
     }
@@ -1571,14 +1574,27 @@ fn bounded_plan(
         return Err(HyperionError::InvalidAmount);
     }
     let plan = plan_outbound(env, request, gas_amount, None)?;
-    match RailAdapterClient::new(env, &plan.adapter_addr).try_check_dispatch(
-        &env.current_contract_address(),
+    let cctp = request.route == RouteKind::Cctp;
+    let mut args = dispatch_prefix(
+        env,
         &request.token,
-        &plan.net,
-        &request.destination.chain,
-        &request.destination.address,
-        &gas_amount,
-    ) {
+        plan.net,
+        &request.destination,
+        request.destination_decimals,
+        cctp,
+    );
+    let method = if cctp {
+        "check_dispatch_revision"
+    } else {
+        "check_dispatch"
+    };
+    args.push_back(gas_amount.into_val(env));
+    let dispatch_check = env.try_invoke_contract::<(), soroban_sdk::Error>(
+        &plan.adapter_addr,
+        &method_symbol(env, method),
+        args,
+    );
+    match dispatch_check {
         Ok(Ok(())) => Ok(plan),
         Err(Ok(error)) if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) => {
             match error.get_code() {
@@ -1592,11 +1608,45 @@ fn bounded_plan(
                 19 => Err(HyperionError::UnknownChain),
                 39 => Err(HyperionError::TokenNotMapped),
                 44 => Err(HyperionError::UnsupportedRoute),
+                59 => Err(HyperionError::StaleMapping),
                 _ => Err(HyperionError::AdapterMethodUnavailable),
             }
         }
         _ => Err(HyperionError::AdapterMethodUnavailable),
     }
+}
+
+#[inline(never)]
+fn method_symbol(env: &Env, method: &str) -> Symbol {
+    Symbol::new(env, method)
+}
+
+// The same caller/token/amount/destination prefix is used by every rail method. Keeping
+// its Val encoding in one function avoids duplicating generated client wrappers in WASM.
+fn dispatch_prefix(
+    env: &Env,
+    token: &Address,
+    amount: i128,
+    destination: &Destination,
+    destination_decimals: u32,
+    cctp: bool,
+) -> Vec<Val> {
+    let raw: Val = env
+        .vec_new_from_slice(&[
+            env.current_contract_address().into_val(env),
+            token.into_val(env),
+            amount.into_val(env),
+            destination.chain.into_val(env),
+            destination.address.into_val(env),
+        ])
+        .unwrap()
+        .into();
+    let mut args = Vec::<Val>::try_from_val(env, &raw).unwrap();
+    if cctp {
+        args.push_back(destination.mapping_revision.into_val(env));
+        args.push_back(destination_decimals.into_val(env));
+    }
+    args
 }
 
 fn bridge_out_inner(
@@ -1619,6 +1669,7 @@ fn bridge_out_inner(
         token,
         route,
         destination,
+        destination_decimals,
         ..
     } = request;
     storage::set_flow_window(&env, &token, route, &updated);
@@ -1628,9 +1679,31 @@ fn bridge_out_inner(
     let client = token::Client::new(&env, &token);
 
     let nonce = storage::next_out_nonce(&env);
+    let cctp = route == RouteKind::Cctp;
+    let mut dispatch_args =
+        dispatch_prefix(&env, &token, net, &destination, destination_decimals, cctp);
+    // Paid calls place nonce before the mapping; unpaid calls place it after the mapping.
+    if cctp && gas_amount.is_some() {
+        dispatch_args.insert(5, nonce.into_val(&env));
+    } else {
+        dispatch_args.push_back(nonce.into_val(&env));
+    }
+    if let Some(gas) = gas_amount {
+        dispatch_args.insert(1, sender.into_val(&env));
+        dispatch_args.push_back(gas.into_val(&env));
+    }
+    let dispatch_method = method_symbol(
+        &env,
+        match (cctp, gas_amount.is_some()) {
+            (true, true) => "dispatch_from_revision",
+            (false, true) => "dispatch_from",
+            (true, false) => "dispatch_revision",
+            (false, false) => "dispatch",
+        },
+    );
     let sender_before = client.balance(&sender);
     let mut expected_debit = gross;
-    if let Some(gas) = gas_amount {
+    let before_this = if let Some(gas) = gas_amount {
         if route == RouteKind::AxelarIts
             && adapter::PaidRailAdapterClient::new(&env, &adapter_addr).gas_token() == token
         {
@@ -1638,42 +1711,24 @@ fn bridge_out_inner(
                 .checked_add(gas)
                 .ok_or(HyperionError::DecimalOverflow)?;
         }
-        if fee > 0 {
-            transfer_exact(&client, &sender, &treasury, fee, false)?;
-        }
-        adapter::PaidRailAdapterClient::new(&env, &adapter_addr).dispatch_from(
-            &this,
-            &sender,
-            &token,
-            &net,
-            &destination.chain,
-            &destination.address,
-            &nonce,
-            &gas,
-        );
+        None
     } else {
-        let before_this = client.balance(&this);
+        let before = client.balance(&this);
         transfer_exact(&client, &sender, &this, gross, false)?;
-
-        if fee > 0 {
-            transfer_exact(&client, &this, &treasury, fee, false)?;
-        }
-
+        Some(before)
+    };
+    if fee > 0 {
+        let fee_payer = if gas_amount.is_some() { &sender } else { &this };
+        transfer_exact(&client, fee_payer, &treasury, fee, false)?;
+    }
+    if let Some(before) = before_this {
         transfer_exact(&client, &this, &adapter_addr, net, false)?;
-        if client.balance(&this) != before_this {
+        if client.balance(&this) != before {
             return Err(HyperionError::InvalidAmount);
         }
-
-        RailAdapterClient::new(&env, &adapter_addr).dispatch(
-            &this,
-            &token,
-            &net,
-            &destination.chain,
-            &destination.address,
-            &nonce,
-        );
     }
 
+    env.invoke_contract::<()>(&adapter_addr, &dispatch_method, dispatch_args);
     assert_exact_transfer(client.balance(&sender), sender_before, expected_debit)?;
 
     let record = TransferRecord {

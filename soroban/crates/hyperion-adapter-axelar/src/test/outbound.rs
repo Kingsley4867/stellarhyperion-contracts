@@ -289,6 +289,7 @@ fn a_chain_axelar_stopped_trusting_takes_the_whole_transfer_down_with_it() {
         destination: Destination {
             chain: polygon,
             address: w.evm(0x01),
+            mapping_revision: 0,
         },
         destination_decimals: EVM_DECIMALS,
         min_destination_amount: 0,

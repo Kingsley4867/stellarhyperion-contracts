@@ -88,8 +88,7 @@ use crate::strkey::StrkeyDestination;
 
 /// Version byte leading every Hyperion note on these rails.
 ///
-/// Shared with [`crate::cctp::HOOK_VERSION`] on purpose. Two rails, one envelope version, so a
-/// reader never has to remember which rail numbers its payloads differently from the other.
+/// Axelar note version. CCTP has an independent revision-bearing hook format.
 pub const NOTE_VERSION: u8 = 1;
 pub const NOTE_VERSION_V1: u8 = NOTE_VERSION;
 pub const SUPPORTED_NOTE_VERSIONS: [u8; 1] = [NOTE_VERSION_V1];
@@ -821,13 +820,6 @@ mod tests {
         assert!(inbound(&env, AddressKind::Account, G_ADDR, 1).needs_trustline());
         assert!(inbound(&env, AddressKind::MuxedAccount, M_ADDR, 1).needs_trustline());
         assert!(!inbound(&env, AddressKind::Contract, C_ADDR, 1).needs_trustline());
-    }
-
-    #[test]
-    fn both_directions_share_the_version_byte_the_cctp_hook_uses() {
-        // One envelope version across both rails. If these ever diverge it should be because
-        // somebody changed one deliberately, and this is the test that makes them notice.
-        assert_eq!(NOTE_VERSION, crate::cctp::HOOK_VERSION);
     }
 
     // -------------------------------------------------------------------------------------

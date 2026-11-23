@@ -167,26 +167,24 @@ contract HyperionNotesTest is Test {
     // -------------------------------------------------------------------------------------
 
     function test_the_hook_is_a_version_and_a_tagged_destination() public view {
-        bytes memory hook = notes.encodeCctpHook(AddressKind.Account, G_KEY, 0);
-        assertEq(hook.length, 34);
-        assertEq(hook, abi.encodePacked(uint8(1), uint8(0), G_KEY));
+        bytes memory hook = notes.encodeCctpHook(AddressKind.Account, G_KEY, 0, 7);
+        assertEq(hook.length, 38);
+        assertEq(hook, abi.encodePacked(uint8(2), uint32(7), uint8(0), G_KEY));
 
-        bytes memory toContract = notes.encodeCctpHook(AddressKind.Contract, C_KEY, 0);
-        assertEq(toContract.length, 34);
-        assertEq(uint8(toContract[1]), uint8(AddressKind.Contract));
+        bytes memory toContract = notes.encodeCctpHook(AddressKind.Contract, C_KEY, 0, 7);
+        assertEq(toContract.length, 38);
+        assertEq(uint8(toContract[5]), uint8(AddressKind.Contract));
     }
 
     function test_a_muxed_hook_is_eight_bytes_wider() public view {
-        bytes memory hook = notes.encodeCctpHook(AddressKind.MuxedAccount, G_KEY, MUXED_ID);
-        assertEq(hook.length, 42);
-        assertEq(hook, abi.encodePacked(uint8(1), uint8(2), G_KEY, MUXED_ID));
+        bytes memory hook = notes.encodeCctpHook(AddressKind.MuxedAccount, G_KEY, MUXED_ID, 7);
+        assertEq(hook.length, 46);
+        assertEq(hook, abi.encodePacked(uint8(2), uint32(7), uint8(2), G_KEY, MUXED_ID));
     }
 
-    function test_the_hook_version_is_the_note_version() public pure {
-        // Deliberately the same number on both rails. If these ever drift apart, whoever is
-        // debugging a stuck transfer has to remember which rail counts its payloads differently,
-        // and at three in the morning they will not.
+    function test_cctp_hook_version_is_revision_bound() public pure {
         assertEq(HyperionNotes.NOTE_VERSION, 1);
+        assertEq(HyperionNotes.CCTP_HOOK_VERSION, 2);
     }
 
     // -------------------------------------------------------------------------------------

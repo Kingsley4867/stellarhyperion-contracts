@@ -26,6 +26,11 @@ AUTH_SNAPSHOT_FIXTURE_PATHS = (
     "script/stellar/test/fixtures/auth-snapshots/valid-paid-dispatch/snapshot.json",
     "script/stellar/test/inspect-axelar-auth.test.mjs",
 )
+INVALID_CHECKSUM_FIXTURE = "GA5ZYIIVYDX5GRF2BKEQD2Y47ZCPG3HX3PUUNPVQ5ZECB57MJG7RLVNV"
+INVALID_CHECKSUM_FIXTURE_PATHS = (
+    "evm/test/unit/AxelarItsAdapter.t.sol",
+    "evm/test/unit/CctpAdapter.t.sol",
+)
 
 # Exact SHA-256 digests independently recomputed from the pinned host source and
 # verified by verify_vendor_provenance.py. These are public content identifiers,
@@ -81,6 +86,7 @@ def configuration():
     path = re.escape(FIXTURE_PATH)
     contract_values = "|".join(PUBLIC_CONTRACT_FIXTURES + SYNTHETIC_CONTRACT_FIXTURES)
     contract_paths = "|".join(re.escape(path) for path in AUTH_SNAPSHOT_FIXTURE_PATHS)
+    invalid_checksum_paths = "|".join(re.escape(path) for path in INVALID_CHECKSUM_FIXTURE_PATHS)
     vendor_hashes = "|".join(PINNED_VENDOR_SOURCE_HASHES)
     vendor_path = re.escape(VENDOR_PROVENANCE_PATH)
     return f"""[extend]
@@ -108,6 +114,13 @@ condition = "AND"
 regexTarget = "secret"
 regexes = ['''^({vendor_hashes})$''']
 paths = ['''^{vendor_path}$''']
+
+[[rules.allowlists]]
+description = "Exact malformed-checksum fixtures in adapter invalid-destination tests"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^({re.escape(INVALID_CHECKSUM_FIXTURE)})$''']
+paths = ['''^({invalid_checksum_paths})$''']
 """
 
 

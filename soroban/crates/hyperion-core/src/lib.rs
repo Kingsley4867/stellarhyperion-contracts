@@ -27,6 +27,13 @@
 //! its queue-and-execute timelock. The source-level assertions in
 //! `packages/protocol/test/parity.test.ts` pin these references and the concrete checks in the
 //! interfaces and setters, so drift or a broken documentation reference fails parity.
+//!
+//! Compatibility policy: payout-relevant ABI signatures, tuple layouts and event schemas are
+//! append-only unless a versioned migration has independently reviewed old records. Removing or
+//! reordering amount, recipient, nonce or replay fields is a breaking gate. Additive fields require
+//! a consumer migration assessment. Exact `i128` amounts, authenticated rail dispatch, replay
+//! protection and recipient-bound claims are never inferred or converted through floating point.
+//! The active Stellar Testnet ITS/CCTP deployment is the baseline; EVM and other rails stay gated.
 #![cfg_attr(not(test), no_std)]
 
 pub mod address;
@@ -73,7 +80,8 @@ pub use maintenance::{
     MAX_MAINTENANCE_BATCH,
 };
 pub use model::{
-    ChainClock, ModelError, ModelRouter, Operation, Rail, Trace, TraceStep, MODEL_MAX_CLAIMS,
+    timelock_boundary_cases, timelock_boundary_cases_for, ChainClock, ModelError, ModelRouter,
+    Operation, Rail, TimelockBoundaryCase, Trace, TraceStep, MODEL_MAX_CLAIMS,
 };
 pub use route::RouteKind;
 pub use strkey::StrkeyDestination;

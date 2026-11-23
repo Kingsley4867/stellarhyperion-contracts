@@ -322,12 +322,14 @@ fn emergency_disable_controls_halt_custody_immediately() {
 
     // Outbound dispatch check is immediately refused
     assert_eq!(
-        w.adapter().try_check_dispatch(
+        w.adapter().try_check_dispatch_revision(
             &w.router_id,
             &w.token_id,
             &1_000_000,
             &w.ethereum(),
             &BytesN::from_array(&w.env, &[0x11u8; 32]),
+            &1,
+            &super::setup::EVM_DECIMALS,
             &None
         ),
         Err(Ok(HyperionError::RouteDisabled))

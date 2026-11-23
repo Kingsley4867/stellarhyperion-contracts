@@ -278,18 +278,27 @@ pub fn hash_message(
     BytesN::from_array(env, &out)
 }
 
-/// Bind signed epochs to the network, adapter, epoch, key and canonical provider message.
-/// Epoch zero is reserved for upgraded legacy Validator-only storage.
+/// The domain tag of the versioned inbound signing envelope.
+///
+/// Bumped whenever the layout changes. A signature under an older tag is not accepted; the only
+/// pre-envelope form left is the raw provider digest, and `bridge_in` admits that solely inside an
+/// explicit, time-bounded epoch-zero migration window.
+pub const VALIDATOR_ATTESTATION_DOMAIN: &[u8] = b"HYPERION_ALLBRIDGE_VALIDATOR_V2";
+
+/// Bind an epoch to the route, network, adapter, epoch, key and canonical provider message.
+///
+/// The route tag is inside the preimage even though this adapter serves only one route: it makes
+/// the separation explicit at the wire format rather than relying on the domain name and adapter
+/// address alone. Epoch zero has no special case here; legacy acceptance is decided by the caller,
+/// which can only do so while an administrator has opened a bounded migration window.
 pub fn validator_attestation_digest(
     env: &Env,
     adapter: &Address,
     epoch: &crate::types::ValidatorEpoch,
     message_id: &BytesN<32>,
 ) -> Result<BytesN<32>, HyperionError> {
-    if epoch.epoch == 0 {
-        return Ok(message_id.clone());
-    }
-    let mut bytes = soroban_sdk::Bytes::from_slice(env, b"HYPERION_ALLBRIDGE_VALIDATOR_V1");
+    let mut bytes = soroban_sdk::Bytes::from_slice(env, VALIDATOR_ATTESTATION_DOMAIN);
+    bytes.extend_from_slice(&hyperion_core::RouteKind::Allbridge.tag().to_be_bytes());
     bytes.append(&env.ledger().network_id().into());
     bytes.extend_from_array(&codec::contract_key(env, adapter)?);
     bytes.extend_from_slice(&epoch.epoch.to_be_bytes());

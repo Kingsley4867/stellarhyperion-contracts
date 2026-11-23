@@ -8,15 +8,22 @@
 //!
 //! # Inbound delivery resolution
 //!
-//! Inbound transfers verify signed validator messages from Allbridge Core. The digest signed by
-//! the validators covers `(amount, recipient, source_chain_id, destination_chain_id, receive_token, nonce)`.
+//! Inbound transfers verify domain-separated validator signatures. The signed envelope is
+//! `SHA-256("HYPERION_ALLBRIDGE_VALIDATOR_V2" || route_tag || network_id || adapter || epoch ||
+//! validator_key || message_id)`, and `message_id` is Allbridge's provider digest over
+//! `(amount, recipient, source_chain_id, destination_chain_id, receive_token, nonce)`. The route,
+//! network, adapter, validator epoch and key, recipient, amount, source lane, local token and nonce
+//! are therefore all authenticated together.
+//!
 //! The adapter verifies the ed25519 signature against the registered validator key, guards against
-//! replay attacks, ensures the local asset mapping is valid, pre-authorises the transfer to the router,
-//! and forwards the verified delivery to `router.bridge_in`.
+//! replay attacks, ensures the local asset mapping is valid, pre-authorises the transfer to the
+//! router, and forwards the verified delivery to `router.bridge_in`.
 //!
 //! This is a configured-validator trust model: successful verification proves that the configured
 //! Allbridge key signed the message, not that Circle or Axelar independently attested to it.
 //! Deployment readiness is assessed off-chain; this contract does not implement an activation gate.
+//! The only exception to domain separation is the legacy epoch-zero form, whose raw provider digest
+//! is accepted solely while an administrator has opened a bounded migration window.
 //!
 //! One consequence worth stating plainly: `receive_amount_min`, the slippage guard, is chosen by
 //! whoever calls `receive_tokens` on the destination chain. Outbound from Stellar that is not
@@ -342,12 +349,25 @@ impl AllbridgeAdapter {
             return Err(HyperionError::Unauthorized);
         }
 
-        let digest = rail::validator_attestation_digest(
-            &env,
-            &env.current_contract_address(),
-            &validator,
-            &message_id,
-        )?;
+        // Fresh deployments sign the domain-bound envelope. Only an upgraded deployment still
+        // holding epoch-zero storage may present the raw provider digest, and only while an
+        // administrator has explicitly opened a bounded migration window. With no window set,
+        // which is the default, a legacy signature is refused like any other unauthorized one.
+        let digest = if validator.epoch == 0 {
+            let deadline =
+                storage::legacy_attestation_deadline(&env).ok_or(HyperionError::Unauthorized)?;
+            if env.ledger().timestamp() > deadline {
+                return Err(HyperionError::RequestExpired);
+            }
+            message_id.clone()
+        } else {
+            rail::validator_attestation_digest(
+                &env,
+                &env.current_contract_address(),
+                &validator,
+                &message_id,
+            )?
+        };
         env.crypto()
             .ed25519_verify(&validator.validator, &digest.into(), &signature);
 
@@ -810,6 +830,32 @@ impl AllbridgeAdapter {
         Ok(())
     }
 
+    /// Open the bounded window in which epoch-zero provider-digest signatures are accepted.
+    ///
+    /// This exists only for an upgraded deployment whose signers have not yet moved to the
+    /// domain-bound envelope. It is off by default, cannot be opened for more than seven days,
+    /// and expires without any further call. A fresh epoch-one deployment never needs it.
+    pub fn enable_legacy_attestations(env: Env, valid_until: u64) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        let now = env.ledger().timestamp();
+        if valid_until <= now
+            || valid_until > now.saturating_add(storage::MAX_LEGACY_ATTESTATION_WINDOW)
+        {
+            return Err(HyperionError::InvalidWindow);
+        }
+        storage::set_legacy_attestation_deadline(&env, valid_until);
+        events::LegacyAttestationWindowSet { valid_until }.publish(&env);
+        Ok(())
+    }
+
+    /// Close the legacy window early, refusing raw provider digests from that point on.
+    pub fn disable_legacy_attestations(env: Env) -> Result<(), HyperionError> {
+        require_admin(&env)?;
+        storage::clear_legacy_attestation_deadline(&env);
+        events::LegacyAttestationWindowSet { valid_until: 0 }.publish(&env);
+        Ok(())
+    }
+
     pub fn set_emergency_disabled(env: Env, disabled: bool) -> Result<(), HyperionError> {
         let _ = require_admin(&env)?;
         storage::set_emergency_disabled(&env, disabled);
@@ -927,6 +973,12 @@ impl AllbridgeAdapter {
         active_validator(&env)
     }
 
+    /// The end of the legacy acceptance window, or zero when raw provider digests are refused.
+    pub fn legacy_attestation_deadline(env: Env) -> Result<u64, HyperionError> {
+        let _ = storage::config(&env)?;
+        Ok(storage::legacy_attestation_deadline(&env).unwrap_or(0))
+    }
+
     /// Return source evidence; caller-asserted status never authorizes a second debit.
     pub fn reconcile_outbound(
         env: Env,
@@ -964,7 +1016,7 @@ fn require_admin(env: &Env) -> Result<Config, HyperionError> {
     Ok(cfg)
 }
 
-/// Retain epoch-zero signatures for legacy Validator-only storage until delayed migration.
+/// Retain an epoch-zero key for legacy Validator-only storage until delayed migration.
 fn active_validator(env: &Env) -> Result<ValidatorEpoch, HyperionError> {
     storage::validator_epoch(env)
         .or_else(|| {

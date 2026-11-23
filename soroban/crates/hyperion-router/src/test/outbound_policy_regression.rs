@@ -264,6 +264,7 @@ impl PaidWorld {
             destination: Destination {
                 chain: String::from_str(&self.world.env, chain),
                 address: evm_destination(&self.world.env, address),
+                mapping_revision: 0,
             },
             destination_decimals: 6,
             min_destination_amount: 99_900_001,

@@ -28,4 +28,5 @@ mod maintenance;
 mod approval;
 
 mod capabilities;
+mod rehearsal;
 mod rotation;

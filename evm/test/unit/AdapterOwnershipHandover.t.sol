@@ -28,7 +28,7 @@ contract AdapterOwnershipHandoverTest is Fixture {
         cctp = new CctpAdapter(address(router), address(messenger), address(usdc), admin);
         axelar = new AxelarItsAdapter(address(router), address(its), address(new MockGasService()), admin);
         vm.startPrank(admin);
-        cctp.setLane(STELLAR, STELLAR_DOMAIN, C_KEY);
+        cctp.setLane(STELLAR, STELLAR_DOMAIN, C_KEY, keccak256("Stellar USDC"), 7);
         axelar.setPeer(STELLAR, "stellar", bytes(C_ADDR));
         axelar.linkToken(address(usdc), TOKEN_ID);
         axelar.setDestinationCapability(
@@ -44,7 +44,7 @@ contract AdapterOwnershipHandoverTest is Fixture {
         _nominateBoth();
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
-        cctp.setLane("next", STELLAR_DOMAIN, C_KEY);
+        cctp.setLane("next", STELLAR_DOMAIN, C_KEY, keccak256("Stellar USDC"), 7);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         axelar.setPeer("next", "axelar-next", bytes(C_ADDR));
@@ -55,7 +55,7 @@ contract AdapterOwnershipHandoverTest is Fixture {
         _nominateBoth();
         _acceptBoth();
         vm.startPrank(alice);
-        cctp.setLane("next", STELLAR_DOMAIN, C_KEY);
+        cctp.setLane("next", STELLAR_DOMAIN, C_KEY, keccak256("Stellar USDC"), 7);
         axelar.setPeer("next", "axelar-next", bytes(C_ADDR));
         vm.stopPrank();
         assertTrue(cctp.supportsChain("next"));
@@ -76,7 +76,7 @@ contract AdapterOwnershipHandoverTest is Fixture {
         _acceptBoth();
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, admin));
-        cctp.setLane("next", STELLAR_DOMAIN, C_KEY);
+        cctp.setLane("next", STELLAR_DOMAIN, C_KEY, keccak256("Stellar USDC"), 7);
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, admin));
         axelar.setPeer("next", "axelar-next", bytes(C_ADDR));

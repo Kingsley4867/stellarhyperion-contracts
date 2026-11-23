@@ -38,8 +38,10 @@ method renounceOwnership
 method route
 method setInboundLane
 method setInboundLaneEnabled
+method setInboundMapping
 method setLane
 method setLaneEnabled
+method setLaneMapping
 method setMessageTransmitter
 method supportsChain
 method transferOwnership

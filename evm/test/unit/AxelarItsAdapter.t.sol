@@ -751,7 +751,8 @@ contract AxelarItsAdapterTest is Fixture {
 
     function test_dispatch_refuses_a_chain_with_no_peer() public {
         _fund(AMOUNT);
-        Destination memory destination = Destination({chain: BNB_CHAIN, strkey: G_ADDR});
+        Destination memory destination =
+            Destination({chain: BNB_CHAIN, strkey: G_ADDR, mappingRevision: 0, remoteDecimals: 0});
         vm.prank(address(router));
         vm.expectRevert(UnknownChain.selector);
         adapter.dispatch(address(usdc), AMOUNT, destination, NONCE);
@@ -769,8 +770,9 @@ contract AxelarItsAdapterTest is Fixture {
 
     function test_dispatch_refuses_a_destination_that_fails_its_checksum() public {
         _fund(AMOUNT);
-        Destination memory destination =
-            Destination({chain: STELLAR, strkey: "GA5ZYIIVYDX5GRF2BKEQD2Y47ZCPG3HX3PUUNPVQ5ZECB57MJG7RLVNV"});
+        Destination memory destination = Destination({
+            chain: STELLAR, strkey: "not-a-stellar-strkey", mappingRevision: 0, remoteDecimals: 0
+        });
         vm.prank(address(router));
         vm.expectRevert(InvalidDestination.selector);
         adapter.dispatch(address(usdc), AMOUNT, destination, NONCE);
@@ -1531,12 +1533,12 @@ contract AxelarItsAdapterTest is Fixture {
         string memory tooLongChain = string(new bytes(adapter.MAX_DESTINATION_CHAIN_LENGTH() + 1));
         vm.prank(address(router));
         vm.expectRevert(InvalidLimit.selector);
-        adapter.dispatch(address(usdc), AMOUNT, Destination(tooLongChain, G_ADDR), NONCE);
+        adapter.dispatch(address(usdc), AMOUNT, Destination(tooLongChain, G_ADDR, 0, 0), NONCE);
 
         string memory tooLongAddress = string(new bytes(adapter.MAX_DESTINATION_STRKEY_LENGTH() + 1));
         vm.prank(address(router));
         vm.expectRevert(InvalidLimit.selector);
-        adapter.dispatch(address(usdc), AMOUNT, Destination(STELLAR, tooLongAddress), NONCE);
+        adapter.dispatch(address(usdc), AMOUNT, Destination(STELLAR, tooLongAddress, 0, 0), NONCE);
     }
 
     function test_inspect_outbound_note() public view {

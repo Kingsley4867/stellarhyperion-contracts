@@ -14,6 +14,7 @@ fn request(w: &World) -> OutboundRequest {
         destination: Destination {
             chain: w.ethereum(),
             address: w.evm(1),
+            mapping_revision: 0,
         },
         destination_decimals: 7,
         min_destination_amount: net_of(HUNDRED),

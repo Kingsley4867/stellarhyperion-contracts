@@ -165,6 +165,7 @@ contract RouterOutboundTest is Fixture {
         OutboundRequest memory request = _usdcRequest(1000e6);
         request.token = address(sixToSix);
         request.destinationDecimals = 6;
+        request.destination.remoteDecimals = 6;
         router.bridgeOut(request);
         vm.stopPrank();
 
@@ -184,6 +185,7 @@ contract RouterOutboundTest is Fixture {
         OutboundRequest memory request = _usdcRequest(1e18 + 999_999_999_999);
         request.token = address(wide);
         request.destinationDecimals = 6;
+        request.destination.remoteDecimals = 6;
         router.bridgeOut(request);
         vm.stopPrank();
 
@@ -208,6 +210,7 @@ contract RouterOutboundTest is Fixture {
         OutboundRequest memory request = _usdcRequest(1000);
         request.token = address(wide);
         request.destinationDecimals = 6;
+        request.destination.remoteDecimals = 6;
         vm.expectRevert(AmountNotRepresentable.selector);
         router.bridgeOut(request);
         vm.stopPrank();

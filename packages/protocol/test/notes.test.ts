@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AddressKind, STRKEY_LEN_MUXED, STRKEY_LEN_PLAIN } from "../src/addresses.js";
 import { asciiToBytes, concatBytes, fromHex, toHex } from "../src/bytes.js";
+import { CCTP_HOOK_VERSION } from "../src/cctp.js";
 import {
   METADATA_CONTRACT_CALL,
   NOTE_VERSION,
@@ -198,42 +199,52 @@ describe("inbound notes, which travel to Stellar", () => {
 });
 
 describe("the CCTP hook", () => {
-  it("is a version and a tagged destination, with no room for anything else", () => {
-    const hook = encodeCctpHook(G_ADDR);
-    expect(hook.length).toBe(34);
-    expect(hook[0]).toBe(NOTE_VERSION);
-    expect(hook[1]).toBe(AddressKind.Account);
-    expect(toHex(hook.slice(2))).toBe(G_KEY);
+  it("binds a mapping revision before the tagged destination", () => {
+    const hook = encodeCctpHook(G_ADDR, 1);
+    expect(hook.length).toBe(38);
+    expect(hook[0]).toBe(CCTP_HOOK_VERSION);
+    expect(toHex(hook.slice(1, 5))).toBe("0x00000001");
+    expect(hook[5]).toBe(AddressKind.Account);
+    expect(toHex(hook.slice(6))).toBe(G_KEY);
   });
 
-  it("is forty two bytes when it carries a sub account id", () => {
-    const hook = encodeCctpHook(M_ADDR);
-    expect(hook.length).toBe(42);
+  it("is forty six bytes when it carries a sub account id", () => {
+    const hook = encodeCctpHook(M_ADDR, 1);
+    expect(hook.length).toBe(46);
     const decoded = decodeCctpHook(hook);
+    expect(decoded.mappingRevision).toBe(1);
     expect(decoded.kind).toBe(AddressKind.MuxedAccount);
     expect(decoded.key).toBe(G_KEY);
     expect(decoded.muxedId).toBe(MUXED_ID);
   });
 
   it("round trips a contract destination", () => {
-    const decoded = decodeCctpHook(encodeCctpHook(C_ADDR));
+    const decoded = decodeCctpHook(encodeCctpHook(C_ADDR, 1));
+    expect(decoded.mappingRevision).toBe(1);
     expect(decoded.kind).toBe(AddressKind.Contract);
     expect(decoded.muxedId).toBe(0n);
   });
 
-  it("refuses a length that is neither thirty four nor forty two", () => {
-    expect(() => decodeCctpHook(new Uint8Array(35))).toThrow(/MalformedMessage/);
+  it("refuses a length that is neither thirty eight nor forty six", () => {
+    expect(() => decodeCctpHook(new Uint8Array(39))).toThrow(/MalformedMessage/);
   });
 
   it("refuses a kind byte that does not match the length", () => {
-    const hook = encodeCctpHook(G_ADDR);
-    hook[1] = AddressKind.MuxedAccount;
+    const hook = encodeCctpHook(G_ADDR, 1);
+    hook[5] = AddressKind.MuxedAccount;
     expect(() => decodeCctpHook(hook)).toThrow(/MalformedMessage/);
   });
 
-  it("shares its version with the Axelar note on purpose", () => {
-    // Both versions move together, so an indexer reading either one only has to know one number.
+  it("keeps the Axelar note version independent from the CCTP hook", () => {
     expect(NOTE_VERSION).toBe(1);
+    expect(CCTP_HOOK_VERSION).toBe(2);
+  });
+
+  it("refuses a zero mapping revision", () => {
+    expect(() => encodeCctpHook(G_ADDR, 0)).toThrow(/StaleMapping/);
+    const hook = encodeCctpHook(G_ADDR, 1);
+    hook.fill(0, 1, 5);
+    expect(() => decodeCctpHook(hook)).toThrow(/StaleMapping/);
   });
 });
 

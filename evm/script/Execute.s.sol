@@ -160,6 +160,10 @@ contract Execute is DeployConfig {
             "CCTP destination lane is unavailable"
         );
         require(lane.mintRecipient == record.readBytes32(".stellarRailRecipient"), "CCTP recipient differs");
+        require(lane.remoteToken == record.readBytes32(".stellarCctpToken"), "CCTP token differs");
+        require(lane.mappingRevision == record.readUint(".cctpMappingRevision"), "CCTP revision differs");
+        require(lane.localDecimals == record.readUint(".cctpLocalDecimals"), "CCTP local decimals differ");
+        require(lane.remoteDecimals == record.readUint(".cctpRemoteDecimals"), "CCTP remote decimals differ");
         if (vm.keyExistsJson(record, ".axelarAdapter")) {
             AxelarItsAdapter axelar = AxelarItsAdapter(payable(record.readAddress(".axelarAdapter")));
             require(address(axelar).code.length != 0, "record Axelar adapter has no code");

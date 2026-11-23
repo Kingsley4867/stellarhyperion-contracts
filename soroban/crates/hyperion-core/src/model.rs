@@ -43,7 +43,8 @@ impl ChainClock {
     }
 }
 
-/// Actors: 0 admin, 1 guardian, 2 unrelated caller. IDs are relative to fixture setup.
+/// Fixed actor identities: 0 initial admin, 1 initial guardian, 2 unrelated caller, 3..7 nominees.
+/// EVM grants are additive until renounced; Soroban replaces its configured actor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     Dispatch {
@@ -71,6 +72,15 @@ pub enum Operation {
     QueueFee {
         actor: u8,
         bps: u64,
+    },
+    QueueAuthority {
+        actor: u8,
+        target: u8,
+        guardian: bool,
+    },
+    Renounce {
+        actor: u8,
+        guardian: bool,
     },
     Execute {
         actor: u8,
@@ -136,6 +146,278 @@ impl Operation {
     }
 }
 
+/// One deterministic administrative sequence for timelock boundary exploration.
+///
+/// This is fixture vocabulary, not contract state. It covers nomination, supersession,
+/// cancellation, disable (pause), early/execution-race, maturity and expiration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelockBoundaryCase {
+    pub name: &'static str,
+    pub operation: Operation,
+}
+
+pub const fn timelock_boundary_cases() -> [TimelockBoundaryCase; 38] {
+    timelock_boundary_cases_for(
+        0,
+        ChainClock::Soroban {
+            ledger: 0,
+            timestamp: 0,
+        },
+    )
+}
+
+/// Seeded full administrative payloads, keeping each chain's authority policy and time floor.
+pub const fn timelock_boundary_cases_for(
+    seed: u64,
+    clock: ChainClock,
+) -> [TimelockBoundaryCase; 38] {
+    let evm = matches!(clock, ChainClock::Evm { .. });
+    let delay = if evm { 172800 } else { 3600 };
+    let admin = 3 + ((seed & 1) * 2) as u8;
+    let guardian = admin + 1;
+    let rejected_admin = admin ^ 2;
+    let rejected_guardian = guardian ^ 2;
+    let bps = 10 + seed % 70;
+    [
+        TimelockBoundaryCase {
+            name: "admin nomination later cancelled",
+            operation: Operation::QueueAuthority {
+                actor: 0,
+                target: rejected_admin,
+                guardian: false,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "replacement admin nomination",
+            operation: Operation::QueueAuthority {
+                actor: 0,
+                target: admin,
+                guardian: false,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "superseded nomination cancellation",
+            operation: Operation::Cancel { actor: 1, id: 1 },
+        },
+        TimelockBoundaryCase {
+            name: "guardian nomination",
+            operation: Operation::QueueAuthority {
+                actor: 0,
+                target: guardian,
+                guardian: true,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "guardian nomination later cancelled",
+            operation: Operation::QueueAuthority {
+                actor: 0,
+                target: rejected_guardian,
+                guardian: true,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "cancel superseded guardian",
+            operation: Operation::Cancel { actor: 1, id: 4 },
+        },
+        TimelockBoundaryCase {
+            name: "pending nominee cannot queue",
+            operation: Operation::QueueFee { actor: admin, bps },
+        },
+        TimelockBoundaryCase {
+            name: "cancelled nominee cannot queue",
+            operation: Operation::QueueFee {
+                actor: rejected_admin,
+                bps,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "pending guardian cannot disable",
+            operation: Operation::Pause { actor: guardian },
+        },
+        TimelockBoundaryCase {
+            name: "early execution race",
+            operation: Operation::Execute { actor: 0, id: 2 },
+        },
+        TimelockBoundaryCase {
+            name: "one second before maturity",
+            operation: Operation::Advance {
+                seconds: delay - 1,
+                ledgers: 0,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "refuse at eta minus one",
+            operation: Operation::Execute { actor: 0, id: 2 },
+        },
+        TimelockBoundaryCase {
+            name: "exact maturity",
+            operation: Operation::Advance {
+                seconds: 1,
+                ledgers: 0,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "grant or replace guardian",
+            operation: Operation::Execute { actor: 0, id: 3 },
+        },
+        TimelockBoundaryCase {
+            name: "grant or replace admin",
+            operation: Operation::Execute { actor: 0, id: 2 },
+        },
+        TimelockBoundaryCase {
+            name: "retire old admin",
+            operation: if evm {
+                Operation::Renounce {
+                    actor: 0,
+                    guardian: false,
+                }
+            } else {
+                Operation::QueueFee { actor: 0, bps }
+            },
+        },
+        TimelockBoundaryCase {
+            name: "old admin cannot queue",
+            operation: Operation::QueueFee { actor: 0, bps },
+        },
+        TimelockBoundaryCase {
+            name: "retire old guardian",
+            operation: if evm {
+                Operation::Renounce {
+                    actor: 1,
+                    guardian: true,
+                }
+            } else {
+                Operation::Pause { actor: 1 }
+            },
+        },
+        TimelockBoundaryCase {
+            name: "old guardian cannot disable",
+            operation: Operation::Pause { actor: 1 },
+        },
+        TimelockBoundaryCase {
+            name: "new admin queues full fee payload",
+            operation: Operation::QueueFee { actor: admin, bps },
+        },
+        TimelockBoundaryCase {
+            name: "new guardian disables",
+            operation: Operation::Pause { actor: guardian },
+        },
+        TimelockBoundaryCase {
+            name: "old admin cannot unpause",
+            operation: Operation::Unpause { actor: 0 },
+        },
+        TimelockBoundaryCase {
+            name: "new admin unpauses",
+            operation: Operation::Unpause { actor: admin },
+        },
+        TimelockBoundaryCase {
+            name: "new queued action still early",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 5,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "new action maturity",
+            operation: Operation::Advance {
+                seconds: delay,
+                ledgers: 0,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "execute at exact eta",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 5,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "execution race loser",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 5,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "queue last-second boundary",
+            operation: Operation::QueueFee {
+                actor: admin,
+                bps: bps + 1,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "inclusive expires at",
+            operation: Operation::Advance {
+                seconds: delay + 604800,
+                ledgers: 0,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "execute at exact expires at",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 6,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "queue actual expiring action",
+            operation: Operation::QueueFee {
+                actor: admin,
+                bps: bps + 2,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "one second beyond expiry",
+            operation: Operation::Advance {
+                seconds: delay + 604801,
+                ledgers: 0,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "expired execution refused",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 7,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "cancel expired action",
+            operation: Operation::Cancel {
+                actor: guardian,
+                id: 7,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "superseded nominee cannot execute",
+            operation: Operation::Execute {
+                actor: rejected_admin,
+                id: 7,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "queue cancellation race",
+            operation: Operation::QueueFee {
+                actor: admin,
+                bps: bps + 3,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "guardian cancellation wins",
+            operation: Operation::Cancel {
+                actor: guardian,
+                id: 8,
+            },
+        },
+        TimelockBoundaryCase {
+            name: "cancelled execution refused",
+            operation: Operation::Execute {
+                actor: admin,
+                id: 8,
+            },
+        },
+    ]
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelError {
     Unauthorized,
@@ -159,7 +441,8 @@ pub struct ModelClaim {
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Action {
-    bps: u64,
+    kind: u8,
+    value: u64,
     eta: u64,
     pending: bool,
 }
@@ -179,6 +462,8 @@ pub struct ModelRouter {
     pub nonce: u64,
     pub claim_count: usize,
     pub action_count: usize,
+    pub admin_actors: u16,
+    pub guardian_actors: u16,
     pub claims: [ModelClaim; MODEL_MAX_CLAIMS],
     blocked: [bool; 2],
     seen: [bool; 16],
@@ -200,6 +485,8 @@ impl ModelRouter {
             nonce: 0,
             claim_count: 0,
             action_count: 0,
+            admin_actors: 1,
+            guardian_actors: 2,
             claims: [ModelClaim::default(); MODEL_MAX_CLAIMS],
             blocked: [false; 2],
             seen: [false; 16],
@@ -254,6 +541,42 @@ impl ModelRouter {
         let result = next.step(op)?;
         *self = next;
         Ok(result)
+    }
+    /// Full retained model payload for failure traces: kind (fee/admin/guardian), value, eta, pending.
+    pub fn action_details(&self, id: usize) -> Option<(u8, u64, u64, bool)> {
+        if id == 0 || id > self.action_count {
+            return None;
+        }
+        let action = self.actions[id - 1];
+        Some((action.kind, action.value, action.eta, action.pending))
+    }
+    pub fn is_admin(&self, actor: u8) -> bool {
+        actor < 8 && self.admin_actors & (1 << actor) != 0
+    }
+    pub fn is_guardian(&self, actor: u8) -> bool {
+        actor < 8 && self.guardian_actors & (1 << actor) != 0
+    }
+    fn queue(&mut self, actor: u8, kind: u8, value: u64) -> Result<u64, ModelError> {
+        if !self.is_admin(actor) {
+            return Err(ModelError::Unauthorized);
+        }
+        if kind == 0 && value > 100 {
+            return Err(ModelError::FeeTooHigh);
+        }
+        if kind != 0 && value >= 8 {
+            return Err(ModelError::InvalidAmount);
+        }
+        if self.action_count == MODEL_MAX_STEPS {
+            return Err(ModelError::Capacity);
+        }
+        self.actions[self.action_count] = Action {
+            kind,
+            value,
+            eta: self.clock.timestamp() + self.delay,
+            pending: true,
+        };
+        self.action_count += 1;
+        Ok(self.action_count as u64)
     }
     fn step(&mut self, op: Operation) -> Result<u64, ModelError> {
         use ModelError as E;
@@ -330,7 +653,7 @@ impl ModelRouter {
             }
             Operation::Pause { actor } | Operation::Unpause { actor } => {
                 let pause = matches!(op, Operation::Pause { .. });
-                if actor > 1 || (!pause && actor != 0) {
+                if !self.is_admin(actor) && (!pause || !self.is_guardian(actor)) {
                     return Err(E::Unauthorized);
                 }
                 if matches!(self.clock, ChainClock::Evm { .. }) && self.paused == pause {
@@ -338,27 +661,27 @@ impl ModelRouter {
                 }
                 self.paused = pause;
             }
-            Operation::QueueFee { actor, bps } => {
-                if actor != 0 {
+            Operation::QueueFee { actor, bps } => return self.queue(actor, 0, bps),
+            Operation::QueueAuthority {
+                actor,
+                target,
+                guardian,
+            } => {
+                return self.queue(actor, if guardian { 2 } else { 1 }, target as u64);
+            }
+            Operation::Renounce { actor, guardian } => {
+                if !matches!(self.clock, ChainClock::Evm { .. }) || actor >= 8 {
                     return Err(E::Unauthorized);
                 }
-                if bps > 100 {
-                    return Err(E::FeeTooHigh);
+                if guardian {
+                    self.guardian_actors &= !(1 << actor);
+                } else {
+                    self.admin_actors &= !(1 << actor);
                 }
-                if self.action_count == MODEL_MAX_STEPS {
-                    return Err(E::Capacity);
-                }
-                self.actions[self.action_count] = Action {
-                    bps,
-                    eta: self.clock.timestamp() + self.delay,
-                    pending: true,
-                };
-                self.action_count += 1;
-                return Ok(self.action_count as u64);
             }
             Operation::Execute { actor, id } | Operation::Cancel { actor, id } => {
                 let execute = matches!(op, Operation::Execute { .. });
-                if actor > 1 || (execute && actor != 0) {
+                if !self.is_admin(actor) && (execute || !self.is_guardian(actor)) {
                     return Err(E::Unauthorized);
                 }
                 if id == 0 || id > self.action_count || !self.actions[id - 1].pending {
@@ -372,7 +695,20 @@ impl ModelRouter {
                     if self.clock.timestamp() > action.eta + 604800 {
                         return Err(E::Expired);
                     }
-                    self.fee_bps = action.bps;
+                    if action.kind == 0 {
+                        self.fee_bps = action.value;
+                    } else {
+                        let actors = if action.kind == 1 {
+                            &mut self.admin_actors
+                        } else {
+                            &mut self.guardian_actors
+                        };
+                        if matches!(self.clock, ChainClock::Evm { .. }) {
+                            *actors |= 1 << action.value;
+                        } else {
+                            *actors = 1 << action.value;
+                        }
+                    }
                 }
                 action.pending = false;
             }
@@ -451,6 +787,42 @@ impl Trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authority_boundaries_include_real_handover_and_inclusive_expiry() {
+        for clock in [
+            ChainClock::Evm { timestamp: 100 },
+            ChainClock::Soroban {
+                timestamp: 100,
+                ledger: 1,
+            },
+        ] {
+            for seed in 0..12 {
+                let mut model = ModelRouter::new(clock);
+                for case in timelock_boundary_cases_for(seed, clock) {
+                    let result = model.apply(case.operation);
+                    match case.name {
+                        "refuse at eta minus one" => assert_eq!(result, Err(ModelError::Early)),
+                        "execute at exact eta" | "execute at exact expires at" => {
+                            assert_eq!(result, Ok(0))
+                        }
+                        "expired execution refused" => assert_eq!(result, Err(ModelError::Expired)),
+                        "old admin cannot queue"
+                        | "old guardian cannot disable"
+                        | "superseded nominee cannot execute" => {
+                            assert_eq!(result, Err(ModelError::Unauthorized))
+                        }
+                        "execution race loser" => assert_eq!(result, Err(ModelError::Missing)),
+                        _ => (),
+                    }
+                }
+                assert!(!model.is_admin(0));
+                assert!(!model.is_guardian(1));
+                assert_eq!(model.action_count, 8);
+                assert_eq!(model.fee_bps, 11 + seed % 70);
+                assert!(model.conserved());
+            }
+        }
+    }
     #[test]
     fn clocks_do_not_exchange_ledgers_for_seconds() {
         let mut clock = ChainClock::Soroban {

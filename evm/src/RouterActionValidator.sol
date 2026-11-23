@@ -20,7 +20,15 @@ import {
     UpgradeableAdapterUnsupported,
     ZeroAddress
 } from "./HyperionErrors.sol";
-import {ActionKind, AdminAction, RouteKind, TokenConfig} from "./HyperionTypes.sol";
+import {
+    ActionKind,
+    ActionStatus,
+    ActionStatusView,
+    AdminAction,
+    QueuedAction,
+    RouteKind,
+    TokenConfig
+} from "./HyperionTypes.sol";
 import {AmountMath} from "./libraries/AmountMath.sol";
 import {FlowGuard, FlowWindow} from "./libraries/FlowGuard.sol";
 
@@ -39,6 +47,10 @@ interface IRouterActionState {
     function MAX_FLOW_WINDOW() external view returns (uint64);
     /// @notice The router's active rolling window length.
     function flowWindow() external view returns (uint64);
+    /// @notice Retained proposal payload, including terminal actions.
+    function queuedAction(uint64 id) external view returns (QueuedAction memory);
+    /// @notice Whether a retained proposal was cancelled.
+    function actionCancelled(uint64 id) external view returns (bool);
 }
 
 /// @title Immutable governance validation and token-wide breaker accounting
@@ -126,6 +138,28 @@ contract RouterActionValidator {
         if (breaker.tripped) return;
         breaker.tripped = true;
         emit CircuitBreakerTripped(token, observed, threshold);
+    }
+
+    /// @notice Compute the stable lifecycle view from the immutable router's retained state.
+    function actionStatus(uint64 id) external view returns (ActionStatusView memory) {
+        IRouterActionState target = IRouterActionState(ROUTER);
+        QueuedAction memory queued = target.queuedAction(id);
+        bool cancelled = target.actionCancelled(id);
+        ActionStatus status = queued.id == 0
+            ? ActionStatus.NotFound
+            : cancelled
+                ? ActionStatus.Cancelled
+                : queued.executed
+                    ? ActionStatus.Executed
+                    : block.timestamp < queued.eta
+                        ? ActionStatus.Pending
+                        : block.timestamp > queued.expiresAt ? ActionStatus.Expired : ActionStatus.Executable;
+        return ActionStatusView({
+            status: status,
+            queued: queued,
+            cancelled: cancelled,
+            payloadIdentity: queued.id == 0 ? bytes32(0) : keccak256(abi.encode(queued.action))
+        });
     }
 
     /// @notice Validate a proposal against the router's actual current state.

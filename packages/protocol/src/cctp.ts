@@ -28,8 +28,11 @@ export const BURN_MESSAGE_VERSION = 1;
  */
 export const FINALITY_THRESHOLD_FINALIZED = 2000;
 
-/** Version byte on Hyperion's own hook payload. */
-export const HOOK_VERSION = 1;
+/** Version byte on Hyperion's revision-bound CCTP hook payload. */
+export const CCTP_HOOK_VERSION = 2;
+
+/** Versioned Stellar-to-EVM CCTP outbound note length. */
+export const CCTP_OUTBOUND_NOTE_LEN = 33;
 
 /** Diagnostic format version for CCTP approval lifecycle audits. */
 export const APPROVAL_DIAGNOSTICS_VERSION = 1;

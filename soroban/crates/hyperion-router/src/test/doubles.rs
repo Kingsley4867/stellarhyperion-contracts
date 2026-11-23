@@ -123,6 +123,68 @@ impl MockRail {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_dispatch_revision(
+        _env: Env,
+        _caller: Address,
+        _token: Address,
+        _amount: i128,
+        _destination_chain: String,
+        _destination: BytesN<32>,
+        _mapping_revision: u32,
+        _destination_decimals: u32,
+        _gas_amount: Option<i128>,
+    ) {
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_revision(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        _mapping_revision: u32,
+        _destination_decimals: u32,
+        nonce: u64,
+    ) -> Result<(), RailError> {
+        Self::dispatch(
+            env,
+            caller,
+            token,
+            amount,
+            destination_chain,
+            destination,
+            nonce,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_from_revision(
+        env: Env,
+        caller: Address,
+        _sender: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        nonce: u64,
+        _mapping_revision: u32,
+        _destination_decimals: u32,
+        _gas_amount: i128,
+    ) -> Result<(), RailError> {
+        Self::dispatch(
+            env,
+            caller,
+            token,
+            amount,
+            destination_chain,
+            destination,
+            nonce,
+        )
+    }
+
     /// Play the rail's receiver: authorise the pull, then hand the delivery to the router.
     ///
     /// The router's error is passed straight back out rather than aborting, so a test can name

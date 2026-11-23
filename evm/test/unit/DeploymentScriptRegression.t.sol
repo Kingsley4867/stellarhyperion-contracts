@@ -5,6 +5,7 @@ import {Execute} from "../../script/Execute.s.sol";
 import {Verify} from "../../script/Verify.s.sol";
 import {HyperionRouter} from "../../src/HyperionRouter.sol";
 import {ActionKind, AdminAction} from "../../src/HyperionTypes.sol";
+import {CctpAdapter} from "../../src/adapters/CctpAdapter.sol";
 import {Fixture} from "../Fixture.sol";
 
 contract GuardianEvidenceHarness is Verify {
@@ -23,7 +24,83 @@ contract GuardianEvidenceHarness is Verify {
 contract DeploymentScriptRegressionTest is Fixture {
     string private constant RECORD = "deployments/unit-execution-record.json";
 
-    function test_reportOnlyLeavesUnmappedPhaseOneUntouchedWithoutProviders() public {
+    // These scenarios share Foundry's process-wide environment and real record files. Run them
+    // together so the default parallel test runner cannot cross-write their inputs.
+    function test_recordExecutionAndUnsignedVerificationScenarios() public {
+        _reportOnlyLeavesUnmappedPhaseOneUntouchedWithoutProviders();
+        _staleProviderFailsBeforeAnyActionOrBroadcast();
+        _actionIdBeyondUint64IsRejectedBeforeReportOrBroadcast();
+        _unsignedVerifyValidatesPublicArtifactsAndRecordWithoutLiveCodeOrSigner();
+    }
+
+    function _unsignedVerifyValidatesPublicArtifactsAndRecordWithoutLiveCodeOrSigner() private {
+        uint256 originalChain = block.chainid;
+        _unsignedRecord();
+        vm.setEnv("HYPERION_DRY_RUN", "true");
+        vm.setEnv("PRIVATE_KEY", "deliberately-invalid-signer-input");
+        vm.setEnv("HYPERION_ROUTER_ARTIFACT_HASH", vm.toString(keccak256(type(HyperionRouter).creationCode)));
+        vm.setEnv("HYPERION_CCTP_ARTIFACT_HASH", vm.toString(keccak256(type(CctpAdapter).creationCode)));
+        vm.setEnv("CCTP_TOKEN_MESSENGER_CODE_HASH", vm.toString(bytes32(uint256(1))));
+        vm.setEnv("CCTP_MESSAGE_TRANSMITTER_CODE_HASH", vm.toString(bytes32(uint256(2))));
+        Verify verify = new Verify();
+        uint64 count = router.actionCount();
+        verify.run();
+        assertEq(router.actionCount(), count);
+        assertEq(router.feeBps(), FEE_BPS);
+        vm.setEnv("HYPERION_ROUTER_ARTIFACT_HASH", vm.toString(bytes32(0)));
+        vm.expectRevert("missing reviewed artifact identity");
+        verify.run();
+        vm.setEnv("HYPERION_ROUTER_ARTIFACT_HASH", vm.toString(bytes32(uint256(9))));
+        vm.expectRevert("artifact differs from reviewed identity");
+        verify.run();
+        vm.setEnv("HYPERION_ROUTER_ARTIFACT_HASH", vm.toString(keccak256(type(HyperionRouter).creationCode)));
+        vm.setEnv("CCTP_TOKEN_MESSENGER_CODE_HASH", vm.toString(bytes32(0)));
+        vm.expectRevert("missing reviewed provider identity");
+        verify.run();
+        vm.chainId(999_999);
+        vm.expectRevert("unsupported deployment chain");
+        verify.run();
+        vm.chainId(originalChain);
+        vm.setEnv("HYPERION_DRY_RUN", "false");
+        vm.removeFile("deployments/unit-unsigned-verification-record.json");
+    }
+
+    function _unsignedRecord() private {
+        string memory key = "unsigned-verification-record";
+        string memory path = "deployments/unit-unsigned-verification-record.json";
+        vm.setEnv("HYPERION_RECORD", path);
+        vm.serializeUint(key, "chainId", block.chainid);
+        vm.serializeAddress(key, "router", address(router));
+        vm.serializeAddress(key, "cctpAdapter", address(0xCC70));
+        vm.serializeAddress(key, "token", address(usdc));
+        vm.serializeAddress(key, "admin", admin);
+        vm.serializeAddress(key, "guardian", guardian);
+        vm.serializeAddress(key, "treasury", treasury);
+        vm.serializeAddress(key, "deployer", admin);
+        vm.serializeUint(key, "feeBps", FEE_BPS);
+        vm.serializeUint(key, "timelockDelay", TIMELOCK);
+        vm.serializeUint(key, "flowWindow", FLOW_WINDOW);
+        vm.serializeUint(key, "tokenDecimals", USDC_DECIMALS);
+        vm.serializeUint(key, "tokenFlowLimit", FLOW_LIMIT);
+        vm.serializeString(key, "stellarChain", "stellar-testnet");
+        vm.serializeBytes32(key, "stellarRailRecipient", bytes32(uint256(3)));
+        vm.serializeString(key, "evmVersion", "cancun");
+        vm.serializeString(key, "solcVersion", "0.8.28+commit.7893614a");
+        vm.serializeUint(key, "optimizerRuns", 200);
+        vm.serializeBool(key, "viaIR", true);
+        vm.serializeAddress(key, "cctpTokenMessenger", address(0xCC71));
+        vm.serializeAddress(key, "cctpMessageTransmitter", address(0xCC72));
+        vm.serializeAddress(
+            key,
+            "provenanceStore",
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))))
+        );
+        vm.serializeBytes32(key, "provenanceStoreCodeHash", bytes32(uint256(4)));
+        string memory output = vm.serializeUint(key, "deployedAtBlock", block.number);
+        vm.writeFile(path, output);
+    }
+
+    function _reportOnlyLeavesUnmappedPhaseOneUntouchedWithoutProviders() private {
         HyperionRouter fresh = _freshRouter();
         AdminAction memory action = _empty(ActionKind.SetFeeBps);
         action.amount = 20;
@@ -38,7 +115,7 @@ contract DeploymentScriptRegressionTest is Fixture {
         vm.setEnv("HYPERION_REPORT_ONLY", "false");
     }
 
-    function test_staleProviderFailsBeforeAnyActionOrBroadcast() public {
+    function _staleProviderFailsBeforeAnyActionOrBroadcast() private {
         HyperionRouter fresh = _freshRouter();
         AdminAction memory action = _empty(ActionKind.SetFeeBps);
         action.amount = 20;
@@ -54,7 +131,7 @@ contract DeploymentScriptRegressionTest is Fixture {
         assertEq(fresh.feeBps(), FEE_BPS);
     }
 
-    function test_actionIdBeyondUint64IsRejectedBeforeReportOrBroadcast() public {
+    function _actionIdBeyondUint64IsRejectedBeforeReportOrBroadcast() private {
         _record(router, uint256(type(uint64).max) + 1);
         vm.setEnv("HYPERION_REPORT_ONLY", "true");
         Execute execute = new Execute();

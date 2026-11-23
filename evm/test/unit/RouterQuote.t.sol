@@ -167,7 +167,11 @@ contract RouterQuoteTest is Fixture {
 
     function test_blocker_chain_not_supported() public view {
         RouteQuote memory q = router.quote(
-            RouteKind.Cctp, address(usdc), AMOUNT, Destination({chain: "solana", strkey: G_ADDR}), 7
+            RouteKind.Cctp,
+            address(usdc),
+            AMOUNT,
+            Destination({chain: "solana", strkey: G_ADDR, mappingRevision: 1, remoteDecimals: 7}),
+            7
         );
         assertFalse(q.available);
         assertEq(uint8(q.reason), uint8(QuoteBlocker.ChainNotSupported));
@@ -291,7 +295,13 @@ contract RouterQuoteTest is Fixture {
     function test_a_quote_never_reverts_however_silly_the_question() public view {
         // Four nonsensical questions, all of which have to come back as answers. An app that has
         // to wrap every quote in a try is an app that will not.
-        router.quote(RouteKind.Cctp, address(0), 0, Destination({chain: "", strkey: ""}), 255);
+        router.quote(
+            RouteKind.Cctp,
+            address(0),
+            0,
+            Destination({chain: "", strkey: "", mappingRevision: 0, remoteDecimals: 0}),
+            255
+        );
         router.quote(RouteKind.Allbridge, address(usdc), type(uint256).max, _dest(M_ADDR), 255);
         router.quote(RouteKind.AxelarGmp, address(usdc), 1, _dest("not an address at all"), 0);
         router.quote(RouteKind.AxelarIts, address(usdc), type(uint128).max, _dest(C_ADDR), 7);

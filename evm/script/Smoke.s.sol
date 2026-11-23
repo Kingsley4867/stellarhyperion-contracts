@@ -72,12 +72,17 @@ contract Smoke is DeployConfig {
         ctx.recipient = vm.envOr(
             "HYPERION_SMOKE_RECIPIENT", string("GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN")
         );
-        ctx.destination = Destination({chain: ctx.record.readString(".stellarChain"), strkey: ctx.recipient});
+        ctx.destination = Destination({
+            chain: ctx.record.readString(".stellarChain"),
+            strkey: ctx.recipient,
+            mappingRevision: uint32(ctx.record.readUint(".cctpMappingRevision")),
+            remoteDecimals: uint8(ctx.record.readUint(".cctpRemoteDecimals"))
+        });
         // One USDC is a round number on both sides, which makes a wrong decimal conversion obvious
         // in the log rather than plausible.
         ctx.amount = vm.envOr("HYPERION_SMOKE_AMOUNT", uint256(1_000_000));
         // Stellar carries seven decimals and this chain carries six, so the amount widens.
-        ctx.destinationDecimals = 7;
+        ctx.destinationDecimals = uint8(ctx.record.readUint(".cctpRemoteDecimals"));
 
         console.log("record              ", path);
         console.log("router              ", address(ctx.router));
@@ -170,11 +175,14 @@ contract Smoke is DeployConfig {
         require(burn.mintRecipient == ctx.record.readBytes32(".stellarRailRecipient"), "wrong mint recipient");
         require(burn.burnToken == address(ctx.token), "the rail was handed the wrong asset");
 
-        // Thirty four bytes: one of hook version, one of address kind, thirty two of key. A muxed
-        // destination would be forty two. Anything else and the Stellar side cannot read it, and by
-        // then the money is already burned.
-        require(burn.hookData.length == 34, "the hook is not a plain Stellar destination");
-        require(uint8(burn.hookData[0]) == 1, "wrong hook version");
-        require(uint8(burn.hookData[1]) == 0, "a G address should be tagged as an account");
+        // Version, mapping revision, then tagged destination. A plain account destination is
+        // thirty eight bytes; a muxed destination is forty six.
+        require(burn.hookData.length == 38, "the hook is not a revision-bound account destination");
+        require(uint8(burn.hookData[0]) == 2, "wrong hook version");
+        uint32 hookRevision = (uint32(uint8(burn.hookData[1])) << 24)
+            | (uint32(uint8(burn.hookData[2])) << 16) | (uint32(uint8(burn.hookData[3])) << 8)
+            | uint32(uint8(burn.hookData[4]));
+        require(hookRevision == ctx.record.readUint(".cctpMappingRevision"), "wrong hook revision");
+        require(uint8(burn.hookData[5]) == 0, "a G address should be tagged as an account");
     }
 }

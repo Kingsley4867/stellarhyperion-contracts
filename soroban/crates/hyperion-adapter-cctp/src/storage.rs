@@ -4,7 +4,7 @@ use soroban_sdk::{contracttype, Address, BytesN, Env, String};
 use crate::types::FinalityPolicy;
 use crate::types::{
     Config, HistoricalMessengerWindow, HistoricalTokenMessengerWindow, MessengerRotation,
-    PeerMessengerRotation,
+    PeerMessengerRotation, TokenMapping,
 };
 
 pub const BUMP_THRESHOLD: u32 = 17_280;
@@ -42,6 +42,10 @@ pub enum DataKey {
     OldTokenMessenger,
     /// Finality selection for the outbound lane; missing entries default to finalized.
     Finality(u32),
+    /// Revisioned mapping metadata for inbound CCTP messages.
+    TokenMapping(u32, BytesN<32>),
+    /// Reverse lookup for validating outbound requests against the same mapping revision.
+    LocalTokenMapping(u32, Address),
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -147,6 +151,9 @@ pub fn set_remote_sender(env: &Env, domain: u32, remote_sender: &BytesN<32>) {
 }
 
 pub fn asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> Option<Address> {
+    if let Some(mapping) = token_mapping(env, domain, burn_token) {
+        return Some(mapping.local);
+    }
     let key = DataKey::Asset(domain, burn_token.clone());
     let found: Option<Address> = env.storage().persistent().get(&key);
     if found.is_some() {
@@ -157,12 +164,81 @@ pub fn asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> Option<Address>
     found
 }
 
-pub fn set_asset(env: &Env, domain: u32, burn_token: &BytesN<32>, local: &Address) {
-    let key = DataKey::Asset(domain, burn_token.clone());
-    env.storage().persistent().set(&key, local);
+pub fn token_mapping(env: &Env, domain: u32, remote: &BytesN<32>) -> Option<TokenMapping> {
+    let key = DataKey::TokenMapping(domain, remote.clone());
+    let found = env.storage().persistent().get(&key);
+    if found.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    found
+}
+
+pub fn local_token_mapping(env: &Env, domain: u32, local: &Address) -> Option<TokenMapping> {
+    let key = DataKey::LocalTokenMapping(domain, local.clone());
+    let found = env.storage().persistent().get(&key);
+    if found.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+    }
+    found
+}
+
+pub fn set_asset(env: &Env, domain: u32, mapping: &TokenMapping) {
+    let asset_key = DataKey::Asset(domain, mapping.remote.clone());
+    let mapping_key = DataKey::TokenMapping(domain, mapping.remote.clone());
+    let local_key = DataKey::LocalTokenMapping(domain, mapping.local.clone());
+    if let Some(previous) = token_mapping(env, domain, &mapping.remote) {
+        if previous.local != mapping.local {
+            let previous_local_key = DataKey::LocalTokenMapping(domain, previous.local);
+            let previous_local_mapping: Option<TokenMapping> =
+                env.storage().persistent().get(&previous_local_key);
+            if previous_local_mapping
+                .as_ref()
+                .is_some_and(|stored| stored.remote == mapping.remote)
+            {
+                env.storage().persistent().remove(&previous_local_key);
+            }
+        }
+    }
+    env.storage().persistent().set(&asset_key, &mapping.local);
+    env.storage().persistent().set(&mapping_key, mapping);
+    env.storage().persistent().set(&local_key, mapping);
     env.storage()
         .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+        .extend_ttl(&asset_key, BUMP_THRESHOLD, BUMP_TO);
+    env.storage()
+        .persistent()
+        .extend_ttl(&mapping_key, BUMP_THRESHOLD, BUMP_TO);
+    env.storage()
+        .persistent()
+        .extend_ttl(&local_key, BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn touch_asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> bool {
+    let key = DataKey::Asset(domain, burn_token.clone());
+    let mapping_key = DataKey::TokenMapping(domain, burn_token.clone());
+    let mut touched = false;
+    for key in [key, mapping_key] {
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
+            touched = true;
+        }
+    }
+    if let Some(mapping) = token_mapping(env, domain, burn_token) {
+        let local_key = DataKey::LocalTokenMapping(domain, mapping.local);
+        if env.storage().persistent().has(&local_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&local_key, BUMP_THRESHOLD, BUMP_TO);
+            touched = true;
+        }
+    }
+    touched
 }
 
 // ------------------------------------------------------------------------------------------
@@ -337,8 +413,4 @@ pub fn touch_link_by_chain(env: &Env, chain: &String) -> u32 {
         touched += 1;
     }
     touched
-}
-
-pub fn touch_asset(env: &Env, domain: u32, burn_token: &BytesN<32>) -> bool {
-    touch_key(env, &DataKey::Asset(domain, burn_token.clone()))
 }

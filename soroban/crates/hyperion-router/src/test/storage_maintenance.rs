@@ -254,6 +254,7 @@ fn versioned_quotes_conserve_dust_and_legacy_result_matches_dispatch() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: evm_destination(&w.env, 0x33),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,
@@ -321,6 +322,7 @@ fn actual_wasm_upgrade_preserves_state_and_failure_retains_executable() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: evm_destination(&w.env, 0x44),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,

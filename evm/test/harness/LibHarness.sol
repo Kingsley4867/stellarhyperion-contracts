@@ -125,7 +125,15 @@ contract NotesHarness {
         pure
         returns (bytes memory)
     {
-        return HyperionNotes.encodeCctpHook(kind, key, muxedId);
+        return HyperionNotes.encodeCctpHook(kind, key, muxedId, 1);
+    }
+
+    function encodeCctpHook(AddressKind kind, bytes32 key, uint64 muxedId, uint32 mappingRevision)
+        external
+        pure
+        returns (bytes memory)
+    {
+        return HyperionNotes.encodeCctpHook(kind, key, muxedId, mappingRevision);
     }
 
     function toEvmAddress(bytes32 word) external pure returns (address) {

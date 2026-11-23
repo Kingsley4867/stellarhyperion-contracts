@@ -24,6 +24,7 @@ method MIN_TIMELOCK_DELAY
 method TRANSFER_INTENT_TYPEHASH
 method actionCancelled
 method actionCount
+method actionStatus
 method adapter
 method adapterCodeHash
 method bridgeIn

@@ -39,6 +39,7 @@ import {
 import {
     ActionAuditStatus,
     ActionKind,
+    ActionStatusView,
     AddressKind,
     AdminAction,
     CancelReason,
@@ -301,13 +302,14 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// is repeated by `_bridgeOut`, which then charges the flow window immediately before funds
     /// move. If the permit is expired, replayed, or signed for another spender or amount, the
     /// token reverts and the whole dispatch is rolled back.
-    function bridgeOutWithPermit(
-        OutboundRequest calldata request,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external payable override nonReentrant whenNotPaused returns (uint64 nonce) {
+    function bridgeOutWithPermit(OutboundRequest calldata request, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint64 nonce)
+    {
         (OutboundPlan memory plan,) = _previewOutbound(request);
         IERC20Permit(request.token).permit(msg.sender, address(this), plan.gross, deadline, v, r, s);
         return _bridgeOut(request, msg.sender);
@@ -379,8 +381,8 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
             uint256 senderAfter = token.balanceOf(intent.sender);
             uint256 relayerAfter = token.balanceOf(msg.sender);
             if (
-                senderAfter > senderBefore || senderBefore - senderAfter != charge
-                    || relayerAfter < relayerBefore || relayerAfter - relayerBefore != charge
+                senderAfter > senderBefore || senderBefore - senderAfter != charge || relayerAfter < relayerBefore
+                    || relayerAfter - relayerBefore != charge
             ) revert InvalidRelayerFee();
             emit RelayerFeePaid(intent.sender, feeToken, msg.sender, charge);
         }
@@ -398,14 +400,37 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         address feeToken,
         uint256 maxRelayerCharge
     ) external view override returns (bytes32) {
-        return OUTBOUND_PROVENANCE.hashTransferIntentWithRelayerFee(intent, feeToken, maxRelayerCharge);
+        // solhint-disable-next-line no-inline-assembly
+        assembly ("memory-safe") {
+            pop(intent)
+            pop(feeToken)
+            pop(maxRelayerCharge)
+        }
+        _forwardProvenance();
+    }
+
+    /// @dev Used only by external views with the immutable child's identical ABI.
+    /// EVM RETURN finishes the external invocation with the child's exact response or revert.
+    function _forwardProvenance() private view {
+        address target = address(OUTBOUND_PROVENANCE);
+        // solhint-disable-next-line no-inline-assembly
+        assembly ("memory-safe") {
+            let result := mload(0x40)
+            calldatacopy(result, 0, calldatasize())
+            let ok := staticcall(gas(), target, result, calldatasize(), 0, 0)
+            returndatacopy(result, 0, returndatasize())
+            if iszero(ok) { revert(result, returndatasize()) }
+            return(result, returndatasize())
+        }
     }
 
     function _bridgeOut(OutboundRequest memory request, address sender) private returns (uint64 nonce) {
         OutboundPlan memory plan = _planOutbound(request);
         // The legacy wrapper retains its historical path; bounded and signed entrypoints run the
         // adapter's local validation before any token movement.
-        if (msg.sig != this.bridgeOut.selector) _checkAdapterDispatch(request, plan);
+        if (request.route == RouteKind.Cctp || msg.sig != this.bridgeOut.selector) {
+            _checkAdapterDispatch(request, plan);
+        }
 
         _collectOutboundTokens(request.token, sender, plan);
 
@@ -510,9 +535,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         // it would tighten the limit by a number nobody picked.
         flow = _flow[_flowKey(
                 request.token, request.route
-            )].consume(
-            _effectiveFlowLimit(request.token, request.route), net, uint64(block.timestamp), flowWindow
-        );
+            )].consume(_effectiveFlowLimit(request.token, request.route), net, uint64(block.timestamp), flowWindow);
 
         return (OutboundPlan({fee: fee, net: net, gross: fee + net, adapterAddress: adapterAddress}), flow);
     }
@@ -548,13 +571,12 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @dev Pause does not appear here, and that is deliberate. Once a rail has attested a
     /// message the counterpart is already burned on the far side, so refusing it on this side
     /// does not undo anything, it only strands somebody's money. Pausing stops departures.
-    function bridgeIn(
-        RouteKind route,
-        address token,
-        uint256 amount,
-        address recipient,
-        Origin calldata origin
-    ) external override nonReentrant returns (uint64 claimId) {
+    function bridgeIn(RouteKind route, address token, uint256 amount, address recipient, Origin calldata origin)
+        external
+        override
+        nonReentrant
+        returns (uint64 claimId)
+    {
         address expected = _railReceivers[route];
         if (expected == address(0)) revert AdapterNotSet();
         if (msg.sender != expected) revert NotRailReceiver();
@@ -684,11 +706,12 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
-    function explainOutbound(
-        OutboundRequest calldata request,
-        uint256 providerPayment,
-        uint256 maxProviderBudget
-    ) external view override returns (bytes4 blocker) {
+    function explainOutbound(OutboundRequest calldata request, uint256 providerPayment, uint256 maxProviderBudget)
+        external
+        view
+        override
+        returns (bytes4 blocker)
+    {
         try this.checkOutbound(request, providerPayment, maxProviderBudget) {
             return bytes4(0);
         } catch (bytes memory failure) {
@@ -700,11 +723,10 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     /// @param request The legacy outbound request.
     /// @param providerPayment Prospective native payment in wei.
     /// @param maxProviderBudget Maximum native payment in wei.
-    function checkOutbound(
-        OutboundRequest calldata request,
-        uint256 providerPayment,
-        uint256 maxProviderBudget
-    ) external view {
+    function checkOutbound(OutboundRequest calldata request, uint256 providerPayment, uint256 maxProviderBudget)
+        external
+        view
+    {
         if (providerPayment > maxProviderBudget) revert ProviderBudgetExceeded();
         _requireNotPaused();
         (OutboundPlan memory plan,) = _previewOutbound(request);
@@ -748,39 +770,34 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         Destination calldata destination,
         uint8 destinationDecimals
     ) external view override returns (RouteQuoteV2 memory v) {
-        (bool ok, bytes memory result) = address(OUTBOUND_PROVENANCE)
-            .staticcall(
-                abi.encodeCall(
-                    OutboundProvenance.quoteV2, (route, token, amount, destination, destinationDecimals)
-                )
-            );
-        // Forward the immutable child's exact quote schema without a second struct codec.
         // solhint-disable-next-line no-inline-assembly
         assembly ("memory-safe") {
             pop(v)
-            if iszero(ok) { revert(add(result, 32), mload(result)) }
-            return(add(result, 32), mload(result))
+            pop(route)
+            pop(token)
+            pop(amount)
+            pop(destination)
+            pop(destinationDecimals)
         }
+        _forwardProvenance();
     }
 
     /// @inheritdoc IHyperionRouter
-    function quoteAll(
-        address token,
-        uint256 amount,
-        Destination calldata destination,
-        uint8 destinationDecimals
-    ) external view override returns (RouteQuote[] memory quotes) {
-        (bool ok, bytes memory result) = address(OUTBOUND_PROVENANCE)
-            .staticcall(
-                abi.encodeCall(OutboundProvenance.quoteAll, (token, amount, destination, destinationDecimals))
-            );
-        // The immutable child returns the exact legacy array ABI, including any revert bytes.
+    function quoteAll(address token, uint256 amount, Destination calldata destination, uint8 destinationDecimals)
+        external
+        view
+        override
+        returns (RouteQuote[] memory quotes)
+    {
         // solhint-disable-next-line no-inline-assembly
         assembly ("memory-safe") {
             pop(quotes)
-            if iszero(ok) { revert(add(result, 32), mload(result)) }
-            return(add(result, 32), mload(result))
+            pop(token)
+            pop(amount)
+            pop(destination)
+            pop(destinationDecimals)
         }
+        _forwardProvenance();
     }
 
     /// @notice Take a Stellar address apart and say whether it holds together.
@@ -792,18 +809,15 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         view
         returns (AddressKind kind, bytes32 key, uint64 muxedId)
     {
-        (bool ok, bytes memory result) = address(OUTBOUND_PROVENANCE)
-            .staticcall(abi.encodeCall(OutboundProvenance.checkDestination, (strkey)));
-        // Forward the immutable pure parser's exact fixed tuple and errors without another codec.
-        // This method is external, so RETURN cannot terminate an internal Solidity caller.
         // solhint-disable-next-line no-inline-assembly
         assembly ("memory-safe") {
             pop(kind)
             pop(key)
             pop(muxedId)
-            if iszero(ok) { revert(add(result, 32), mload(result)) }
-            return(add(result, 32), mload(result))
+            pop(strkey.offset)
+            pop(strkey.length)
         }
+        _forwardProvenance();
     }
 
     // -------------------------------------------------------------------------------------
@@ -878,12 +892,7 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
         uint64 eta = uint64(block.timestamp) + timelockDelay;
         uint64 expiresAt = eta + GRACE_PERIOD;
         _actions[id] = QueuedAction({
-            id: id,
-            action: action,
-            queuedAt: uint64(block.timestamp),
-            eta: eta,
-            expiresAt: expiresAt,
-            executed: false
+            id: id, action: action, queuedAt: uint64(block.timestamp), eta: eta, expiresAt: expiresAt, executed: false
         });
         if (action.kind == ActionKind.SetAdapter) _queuedAdapterCodeHash[id] = action.subject.codehash;
         emit ActionQueued(id, action.kind, eta, expiresAt);
@@ -973,6 +982,15 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
     }
 
     /// @inheritdoc IHyperionRouter
+    function actionStatus(uint64 id) external view override returns (ActionStatusView memory) {
+        // solhint-disable-next-line no-inline-assembly
+        assembly ("memory-safe") {
+            pop(id)
+        }
+        _forwardProvenance();
+    }
+
+    /// @inheritdoc IHyperionRouter
     function pendingClaim(uint64 id) external view override returns (PendingClaim memory) {
         return _claims[id];
     }
@@ -989,16 +1007,12 @@ contract HyperionRouter is IHyperionRouter, AccessControl, Pausable, ReentrancyG
 
     /// @inheritdoc IHyperionRouter
     function outboundRecord(uint64 nonce) external view override returns (OutboundRecord memory record) {
-        (bool ok, bytes memory result) = address(OUTBOUND_PROVENANCE)
-            .staticcall(abi.encodeCall(OutboundProvenance.outboundRecord, (nonce)));
-        // The immutable router-owned child returns this exact public ABI. Forwarding its bytes
-        // avoids a second dynamic-string decode and encode while preserving revert data.
         // solhint-disable-next-line no-inline-assembly
         assembly ("memory-safe") {
             pop(record)
-            if iszero(ok) { revert(add(result, 32), mload(result)) }
-            return(add(result, 32), mload(result))
+            pop(nonce)
         }
+        _forwardProvenance();
     }
 
     /// @notice The contract allowed to call `bridgeIn` for a rail.

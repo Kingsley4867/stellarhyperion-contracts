@@ -25,12 +25,17 @@ import {
 import {HyperionRouter} from "../../src/HyperionRouter.sol";
 import {
     ActionKind,
+    ActionStatus,
+    ActionStatusView,
     AdminAction,
     CancelReason,
+    OutboundRequest,
     QueuedAction,
     RouteKind,
-    TokenConfig
+    TokenConfig,
+    TransferIntent
 } from "../../src/HyperionTypes.sol";
+import {RouterActionValidator} from "../../src/RouterActionValidator.sol";
 import {IHyperionRouter} from "../../src/interfaces/IHyperionRouter.sol";
 import {Fixture} from "../Fixture.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -44,6 +49,175 @@ import {MockRailAdapter} from "../mocks/MockRailAdapter.sol";
 /// executed twice, an action that matured in March and got run in November, a limit raise
 /// measured against a ceiling that moved while it waited.
 contract RouterAdminTest is Fixture {
+    function test_validation_staticcall_bubbles_empty_failure_without_consuming_action_id() public {
+        address child =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))));
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 20;
+        uint64 beforeCount = router.actionCount();
+        vm.mockCallRevert(child, abi.encodeCall(RouterActionValidator.validate, (action)), bytes(""));
+        vm.prank(admin);
+        (bool ok, bytes memory failure) =
+            address(router).call(abi.encodeCall(HyperionRouter.queueAction, (action)));
+        assertFalse(ok);
+        assertEq(failure, bytes(""));
+        assertEq(router.actionCount(), beforeCount);
+        vm.clearMockedCalls();
+    }
+
+    function test_all_forwarded_reads_preserve_exact_child_response_and_failure_bytes() public {
+        address child =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))));
+        OutboundRequest memory request = _usdcRequest(1e6);
+        TransferIntent memory intent;
+        intent.sender = alice;
+        intent.token = address(usdc);
+        intent.amount = request.amount;
+        intent.route = request.route;
+        intent.destination = request.destination;
+        intent.destinationDecimals = request.destinationDecimals;
+        intent.chainId = block.chainid;
+        intent.router = address(router);
+        bytes[6] memory calls = [
+            abi.encodeCall(
+                HyperionRouter.quoteV2, (RouteKind.Cctp, address(usdc), 1e6, request.destination, uint8(7))
+            ),
+            abi.encodeCall(HyperionRouter.quoteAll, (address(usdc), 1e6, request.destination, uint8(7))),
+            abi.encodeCall(HyperionRouter.checkDestination, (request.destination.strkey)),
+            abi.encodeCall(HyperionRouter.outboundRecord, (uint64(1))),
+            abi.encodeCall(HyperionRouter.actionStatus, (type(uint64).max)),
+            abi.encodeCall(
+                HyperionRouter.hashTransferIntentWithRelayerFee, (intent, address(usdc), uint256(3))
+            )
+        ];
+        for (uint256 i; i < calls.length; ++i) {
+            (bool expectedOk, bytes memory expected) = child.staticcall(calls[i]);
+            (bool actualOk, bytes memory actual) = address(router).staticcall(calls[i]);
+            assertEq(actualOk, expectedOk);
+            assertEq(actual, expected);
+            bytes memory failure = i == 0 ? bytes("") : abi.encodeWithSelector(InvalidLimit.selector);
+            vm.mockCallRevert(child, calls[i], failure);
+            (actualOk, actual) = address(router).staticcall(calls[i]);
+            assertFalse(actualOk);
+            assertEq(actual, failure);
+            vm.clearMockedCalls();
+        }
+    }
+
+    function test_typed_status_missing_ids_have_no_payload() public view {
+        uint64[2] memory ids = [uint64(0), type(uint64).max];
+        for (uint256 i; i < ids.length; ++i) {
+            ActionStatusView memory status = router.actionStatus(ids[i]);
+            assertEq(uint256(status.status), uint256(ActionStatus.NotFound));
+            assertEq(status.queued.id, 0);
+            assertEq(status.payloadIdentity, bytes32(0));
+            assertFalse(status.cancelled);
+        }
+    }
+
+    function test_status_executes_at_inclusive_expiry_and_retains_terminal_identity() public {
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 23;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+        ActionStatusView memory initial = router.actionStatus(id);
+        vm.warp(initial.queued.eta - 1);
+        assertEq(uint256(router.actionStatus(id).status), uint256(ActionStatus.Pending));
+        vm.warp(initial.queued.expiresAt);
+        vm.prank(admin);
+        router.executeAction(id);
+        ActionStatusView memory terminal = router.actionStatus(id);
+        assertEq(uint256(terminal.status), uint256(ActionStatus.Executed));
+        assertEq(terminal.queued.id, id);
+        assertEq(terminal.payloadIdentity, initial.payloadIdentity);
+        assertEq(keccak256(abi.encode(terminal.queued.action)), keccak256(abi.encode(action)));
+        vm.warp(initial.queued.expiresAt + 1);
+        assertEq(uint256(router.actionStatus(id).status), uint256(ActionStatus.Executed));
+        assertEq(router.feeBps(), 23);
+    }
+
+    function test_failed_execution_preserves_executable_payload_and_next_id() public {
+        AdminAction memory action = _empty(ActionKind.RaiseTokenFlowLimit);
+        action.subject = address(usdc);
+        action.amount = FLOW_LIMIT + 1;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+        action.amount = FLOW_LIMIT + 2;
+        vm.prank(admin);
+        uint64 higher = router.queueAction(action);
+        vm.warp(block.timestamp + TIMELOCK);
+        vm.prank(admin);
+        router.executeAction(higher);
+        ActionStatusView memory before = router.actionStatus(id);
+        vm.prank(admin);
+        vm.expectRevert(LimitNotRaised.selector);
+        router.executeAction(id);
+        assertEq(keccak256(abi.encode(router.actionStatus(id))), keccak256(abi.encode(before)));
+        assertEq(uint256(before.status), uint256(ActionStatus.Executable));
+        uint64 count = router.actionCount();
+        action = _empty(ActionKind.SetFeeBps);
+        action.amount = 24;
+        vm.prank(admin);
+        assertEq(router.queueAction(action), count + 1);
+    }
+
+    function test_status_forwards_exact_child_schema_and_revert_bytes() public {
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 22;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+        address child =
+            address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", address(router), hex"01")))));
+        bytes memory payload = abi.encodeCall(HyperionRouter.actionStatus, (id));
+        (bool childOk, bytes memory expected) = child.staticcall(payload);
+        (bool routerOk, bytes memory actual) = address(router).staticcall(payload);
+        assertTrue(childOk && routerOk);
+        assertEq(actual, expected);
+        bytes memory failure = abi.encodeWithSelector(InvalidLimit.selector);
+        vm.mockCallRevert(child, payload, failure);
+        (routerOk, actual) = address(router).staticcall(payload);
+        assertFalse(routerOk);
+        assertEq(actual, failure);
+        vm.clearMockedCalls();
+    }
+
+    function test_typed_action_status_tracks_payload_boundaries() public {
+        AdminAction memory action = _empty(ActionKind.SetFeeBps);
+        action.amount = 22;
+        vm.prank(admin);
+        uint64 id = router.queueAction(action);
+
+        ActionStatusView memory pending = router.actionStatus(id);
+        assertEq(uint256(pending.status), uint256(ActionStatus.Pending));
+        assertEq(pending.payloadIdentity, keccak256(abi.encode(action)));
+
+        vm.warp(pending.queued.eta);
+        assertEq(uint256(router.actionStatus(id).status), uint256(ActionStatus.Executable));
+
+        vm.warp(pending.queued.expiresAt);
+        assertEq(uint256(router.actionStatus(id).status), uint256(ActionStatus.Executable));
+
+        vm.warp(pending.queued.expiresAt + 1);
+        assertEq(uint256(router.actionStatus(id).status), uint256(ActionStatus.Expired));
+
+        vm.prank(admin);
+        uint64 freshId = router.queueAction(action);
+        vm.warp(block.timestamp + TIMELOCK + 1);
+        vm.prank(admin);
+        router.executeAction(freshId);
+        assertEq(uint256(router.actionStatus(freshId).status), uint256(ActionStatus.Executed));
+
+        vm.prank(admin);
+        uint64 cancelledId = router.queueAction(action);
+        vm.prank(guardian);
+        router.cancelAction(cancelledId);
+        assertEq(uint256(router.actionStatus(cancelledId).status), uint256(ActionStatus.Cancelled));
+        assertEq(
+            keccak256(abi.encode(router.actionStatus(cancelledId).queued.action)),
+            keccak256(abi.encode(action))
+        );
+    }
+
     function test_cancellation_preserves_payload_and_non_executable_status() public {
         AdminAction memory action = _empty(ActionKind.SetFeeBps);
         action.amount = 22;

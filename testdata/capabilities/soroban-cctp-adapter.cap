@@ -13,9 +13,9 @@ method asset_for
 method audit_allowance
 method cancel_messenger_rotation
 method cancel_peer_rotation
-method check_dispatch
-method dispatch
-method dispatch_from
+method check_dispatch_revision
+method dispatch_from_revision
+method dispatch_revision
 method domain_for
 method get_config
 method get_link
@@ -27,6 +27,7 @@ method lane_readiness
 method link_domain
 method maintain_storage
 method map_asset
+method mapping_for
 method old_peer_messenger
 method old_token_messenger
 method peer_messenger
@@ -51,4 +52,5 @@ method upgrade
 route cctp
 
 # Entry points that attach a provider payment.
-paid-method dispatch_from
+paid-method dispatch_from_revision
+removed-paid-method dispatch_from acknowledged=issue-78 reason="CCTP dispatch now binds mapping revision and remote decimals"

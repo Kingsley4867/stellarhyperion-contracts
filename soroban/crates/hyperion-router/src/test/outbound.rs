@@ -11,6 +11,7 @@ fn dest(world: &World) -> Destination {
     Destination {
         chain: world.ethereum(),
         address: evm_destination(&world.env, 0x11),
+        mapping_revision: 0,
     }
 }
 
@@ -109,6 +110,7 @@ fn a_destination_that_is_not_a_left_padded_evm_word_is_refused() {
     let bad = Destination {
         chain: w.ethereum(),
         address: not_an_evm_address(&w.env),
+        mapping_revision: 0,
     };
     // Truncating this would produce twenty bytes that look like a perfectly ordinary address,
     // and the funds would be gone with nothing on chain to suggest anything went wrong.
@@ -134,6 +136,7 @@ fn a_nameless_destination_chain_is_refused() {
     let nowhere = Destination {
         chain: String::from_str(&w.env, ""),
         address: evm_destination(&w.env, 0x11),
+        mapping_revision: 0,
     };
     assert_eq!(
         w.router().try_bridge_out(
@@ -529,6 +532,7 @@ fn the_asset_issuer_is_not_a_party_to_any_of_this() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: evm_destination(&w.env, 0x44),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,

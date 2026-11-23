@@ -67,9 +67,12 @@ impl InboundSetup {
         );
 
         let epoch = self.world.adapter().validator_epoch();
-        let digest =
+        let digest = if epoch.epoch == 0 {
+            message_id.clone()
+        } else {
             rail::validator_attestation_digest(env, &self.world.adapter_id, &epoch, &message_id)
-                .unwrap();
+                .unwrap()
+        };
         let sig = self.signing_key.sign(&digest.to_array());
         let signature = BytesN::from_array(env, &sig.to_bytes());
         (message_id, signature)
@@ -398,6 +401,139 @@ fn a_signature_from_a_different_validator_reverts() {
     assert_eq!(s.world.token().balance(&s.recipient), 0);
 }
 
+#[test]
+fn a_signature_bound_to_another_adapter_is_refused() {
+    let s = InboundSetup::new();
+    let amount = HUNDRED;
+    let nonce = U256::from_u32(&s.world.env, 304);
+    let token_key = s.token_key();
+    let (message_id, _) = s.sign(
+        amount as u128,
+        &s.recipient,
+        ETH_CHAIN_ID,
+        &token_key,
+        &nonce,
+    );
+
+    let foreign_adapter = Address::generate(&s.world.env);
+    let epoch = s.world.adapter().validator_epoch();
+    let digest =
+        rail::validator_attestation_digest(&s.world.env, &foreign_adapter, &epoch, &message_id)
+            .unwrap();
+    let signature = BytesN::from_array(
+        &s.world.env,
+        &s.signing_key.sign(&digest.to_array()).to_bytes(),
+    );
+
+    s.world.fund_user(amount);
+
+    assert!(s
+        .world
+        .adapter()
+        .try_bridge_in(
+            &s.world.user,
+            &s.world.token_id,
+            &amount,
+            &s.recipient,
+            &ETH_CHAIN_ID,
+            &nonce,
+            &signature,
+        )
+        .is_err());
+    assert!(!s.world.adapter().is_processed(&message_id));
+    assert_eq!(s.world.token().balance(&s.recipient), 0);
+}
+
+#[test]
+fn a_signature_bound_to_another_network_is_refused() {
+    let s = InboundSetup::new();
+    let amount = HUNDRED;
+    let nonce = U256::from_u32(&s.world.env, 305);
+    let token_key = s.token_key();
+    let (message_id, _) = s.sign(
+        amount as u128,
+        &s.recipient,
+        ETH_CHAIN_ID,
+        &token_key,
+        &nonce,
+    );
+
+    let epoch = s.world.adapter().validator_epoch();
+    let original = s.world.env.ledger().get();
+    s.world.env.ledger().with_mut(|l| l.network_id = [9; 32]);
+    let digest =
+        rail::validator_attestation_digest(&s.world.env, &s.world.adapter_id, &epoch, &message_id)
+            .unwrap();
+    s.world.env.ledger().set(original);
+    let signature = BytesN::from_array(
+        &s.world.env,
+        &s.signing_key.sign(&digest.to_array()).to_bytes(),
+    );
+
+    s.world.fund_user(amount);
+
+    assert!(s
+        .world
+        .adapter()
+        .try_bridge_in(
+            &s.world.user,
+            &s.world.token_id,
+            &amount,
+            &s.recipient,
+            &ETH_CHAIN_ID,
+            &nonce,
+            &signature,
+        )
+        .is_err());
+    assert!(!s.world.adapter().is_processed(&message_id));
+    assert_eq!(s.world.token().balance(&s.recipient), 0);
+}
+
+#[test]
+fn altering_recipient_amount_token_or_nonce_invalidates_the_signature() {
+    let s = InboundSetup::new();
+    let amount = HUNDRED;
+    let nonce = U256::from_u32(&s.world.env, 306);
+    let token_key = s.token_key();
+    let (message_id, signature) = s.sign(
+        amount as u128,
+        &s.recipient,
+        ETH_CHAIN_ID,
+        &token_key,
+        &nonce,
+    );
+    let other_recipient = Address::generate(&s.world.env);
+    let other_nonce = U256::from_u32(&s.world.env, 307);
+
+    // Four single-field mutations, each one of which changes a payout-affecting input. The
+    // signature was produced over the original tuple and must not authorize any of them.
+    for (token, recipient, value, call_nonce) in [
+        (&s.world.token_id, &other_recipient, amount, &nonce),
+        (&s.world.token_id, &s.recipient, amount + 1, &nonce),
+        (&s.world.orphan_id, &s.recipient, amount, &nonce),
+        (&s.world.token_id, &s.recipient, amount, &other_nonce),
+    ] {
+        s.world.fund_user(amount);
+        assert!(s
+            .world
+            .adapter()
+            .try_bridge_in(
+                &s.world.user,
+                token,
+                &value,
+                recipient,
+                &ETH_CHAIN_ID,
+                call_nonce,
+                &signature,
+            )
+            .is_err());
+    }
+
+    assert!(!s.world.adapter().is_processed(&message_id));
+    assert_eq!(s.world.token().balance(&s.recipient), 0);
+    assert_eq!(s.world.token().balance(&other_recipient), 0);
+}
+
 // ------------------------------------------------------------------------------------------
 // Validation & Error Handling
 // ------------------------------------------------------------------------------------------
@@ -703,6 +839,39 @@ fn validator_legacy_storage_migrates_without_changing_accepted_epoch_zero_key() 
         &s.token_key(),
         &nonce,
     );
+
+    // Epoch-zero signatures are raw provider digests and carry no network or adapter binding, so
+    // they are refused unless an administrator has explicitly opened a migration window.
+    assert!(w
+        .adapter()
+        .try_bridge_in(
+            &w.user,
+            &w.token_id,
+            &HUNDRED,
+            &s.recipient,
+            &ETH_CHAIN_ID,
+            &nonce,
+            &sig,
+        )
+        .is_err());
+    assert!(!w.adapter().is_processed(&message));
+
+    let now = w.env.ledger().timestamp();
+    assert_eq!(w.adapter().legacy_attestation_deadline(), 0);
+    assert_eq!(
+        w.adapter().try_enable_legacy_attestations(
+            &(now + crate::storage::MAX_LEGACY_ATTESTATION_WINDOW + 1)
+        ),
+        Err(Ok(HyperionError::InvalidWindow))
+    );
+    assert_eq!(
+        w.adapter().try_enable_legacy_attestations(&now),
+        Err(Ok(HyperionError::InvalidWindow))
+    );
+    let deadline = now + 600;
+    w.adapter().enable_legacy_attestations(&deadline);
+    assert_eq!(w.adapter().legacy_attestation_deadline(), deadline);
+
     w.adapter().bridge_in(
         &w.user,
         &w.token_id,
@@ -713,6 +882,31 @@ fn validator_legacy_storage_migrates_without_changing_accepted_epoch_zero_key() 
         &sig,
     );
     assert!(w.adapter().is_processed(&message));
+
+    // The next legacy message is refused once the explicit window closes.
+    let late_nonce = U256::from_u32(&w.env, 904);
+    let (_, late_sig) = s.sign(
+        HUNDRED as u128,
+        &s.recipient,
+        ETH_CHAIN_ID,
+        &s.token_key(),
+        &late_nonce,
+    );
+    w.env.ledger().set_timestamp(deadline + 1);
+    assert_eq!(
+        w.adapter().try_bridge_in(
+            &w.user,
+            &w.token_id,
+            &HUNDRED,
+            &s.recipient,
+            &ETH_CHAIN_ID,
+            &late_nonce,
+            &late_sig,
+        ),
+        Err(Ok(HyperionError::RequestExpired))
+    );
+    w.adapter().disable_legacy_attestations();
+    assert_eq!(w.adapter().legacy_attestation_deadline(), 0);
     let next = BytesN::from_array(
         &w.env,
         &SigningKey::from_bytes(&[56; 32]).verifying_key().to_bytes(),

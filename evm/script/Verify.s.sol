@@ -31,6 +31,10 @@ contract Verify is DeployConfig {
     uint256 internal problems;
 
     function run() external {
+        if (vm.envOr("HYPERION_DRY_RUN", false)) {
+            _unsignedPlan();
+            return;
+        }
         problems = 0;
         string memory path = vm.envOr(
             "HYPERION_RECORD", string.concat("deployments/evm-", vm.toString(block.chainid), "-phase1.json")
@@ -77,6 +81,10 @@ contract Verify is DeployConfig {
         _expectUint("cctp lane domain", lane.domain, STELLAR_CCTP_DOMAIN);
         bytes32 recordedRecipient = record.readBytes32(".stellarRailRecipient");
         _expectBytes32("cctp mint recipient", lane.mintRecipient, recordedRecipient);
+        _expectBytes32("cctp remote token", lane.remoteToken, record.readBytes32(".stellarCctpToken"));
+        _expectUint("cctp mapping revision", lane.mappingRevision, record.readUint(".cctpMappingRevision"));
+        _expectUint("cctp local decimals", lane.localDecimals, record.readUint(".cctpLocalDecimals"));
+        _expectUint("cctp remote decimals", lane.remoteDecimals, record.readUint(".cctpRemoteDecimals"));
 
         address token = record.readAddress(".token");
         _expectTrue("token registered", router.tokenConfig(token).registered);
@@ -98,6 +106,112 @@ contract Verify is DeployConfig {
             console.log("Mismatches          ", problems);
             revert("the chain and the record disagree");
         }
+    }
+
+    /// @dev Public local evidence only. No contract call, RPC, signer or broadcast in this branch.
+    function _unsignedPlan() private view {
+        requireCompatibleExecutionTarget();
+        string memory path = vm.envOr(
+            "HYPERION_RECORD", string.concat("deployments/evm-", vm.toString(block.chainid), "-phase1.json")
+        );
+        string memory record = vm.readFile(path);
+        require(record.readUint(".chainId") == block.chainid, "record chain id differs from plan");
+        address router = record.readAddress(".router");
+        require(
+            router != address(0) && record.readAddress(".cctpAdapter") != address(0)
+                && record.readAddress(".token") != address(0) && record.readAddress(".admin") != address(0)
+                && record.readAddress(".treasury") != address(0)
+                && record.readAddress(".deployer") != address(0),
+            "record has a zero required address"
+        );
+        require(record.readUint(".feeBps") <= 100, "record fee exceeds cap");
+        require(
+            record.readUint(".timelockDelay") >= 1 hours && record.readUint(".timelockDelay") <= 30 days,
+            "record timelock outside bounds"
+        );
+        require(
+            record.readUint(".flowWindow") >= 5 minutes && record.readUint(".flowWindow") <= 7 days,
+            "record flow window outside bounds"
+        );
+        require(
+            record.readUint(".tokenDecimals") <= 18 && record.readUint(".tokenFlowLimit") != 0,
+            "record token configuration outside bounds"
+        );
+        bytes32 chain = keccak256(bytes(record.readString(".stellarChain")));
+        require(
+            chain == keccak256(bytes(STELLAR_CHAIN)) || chain == keccak256(bytes(STELLAR_TESTNET_CHAIN)),
+            "unknown Stellar peer network"
+        );
+        require(record.readBytes32(".stellarRailRecipient") != bytes32(0), "record lacks rail recipient");
+        CompatibilityProfile memory profile =
+            _verifiedArtifactProfile(vm.getArtifactPathByCode(type(HyperionRouter).creationCode));
+        require(
+            keccak256(bytes(record.readString(".evmVersion"))) == keccak256(bytes(profile.evmVersion))
+                && keccak256(bytes(record.readString(".solcVersion")))
+                    == keccak256(bytes(profile.compilerVersion))
+                && record.readUint(".optimizerRuns") == profile.optimizerRuns
+                && record.readBool(".viaIR") == profile.viaIR,
+            "record build profile differs from artifact"
+        );
+        _artifactIdentity("HYPERION_ROUTER_ARTIFACT_HASH", type(HyperionRouter).creationCode);
+        _artifactIdentity("HYPERION_CCTP_ARTIFACT_HASH", type(CctpAdapter).creationCode);
+        _publicCodeIdentity(record.readAddress(".cctpTokenMessenger"), "CCTP_TOKEN_MESSENGER_CODE_HASH");
+        _publicCodeIdentity(
+            record.readAddress(".cctpMessageTransmitter"), "CCTP_MESSAGE_TRANSMITTER_CODE_HASH"
+        );
+        require(
+            record.readAddress(".provenanceStore")
+                    == address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", router, hex"01")))))
+                && record.readBytes32(".provenanceStoreCodeHash") != bytes32(0),
+            "record lacks immutable provenance identity"
+        );
+        require(
+            vm.keyExistsJson(record, ".recoveryManager")
+                == vm.keyExistsJson(record, ".recoveryManagerCodeHash"),
+            "record has incomplete recovery identity"
+        );
+        if (vm.keyExistsJson(record, ".recoveryManager")) {
+            require(
+                record.readAddress(".recoveryManager")
+                        == address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", router, hex"02")))))
+                    && record.readBytes32(".recoveryManagerCodeHash") != bytes32(0),
+                "record has invalid recovery identity"
+            );
+        }
+        if (vm.keyExistsJson(record, ".axelarAdapter")) {
+            require(record.readAddress(".axelarAdapter") != address(0), "record has zero Axelar adapter");
+            _artifactIdentity("HYPERION_AXELAR_ARTIFACT_HASH", type(AxelarItsAdapter).creationCode);
+            _publicCodeIdentity(record.readAddress(".axelarIts"), "AXELAR_ITS_CODE_HASH");
+            _publicCodeIdentity(record.readAddress(".axelarGasService"), "AXELAR_GAS_SERVICE_CODE_HASH");
+            require(record.readBytes32(".axelarTokenId") != bytes32(0), "record lacks Axelar token identity");
+            require(vm.envBytes("STELLAR_AXELAR_PEER").length == 32, "Stellar Axelar peer must be 32 bytes");
+        }
+        console.log("mode                 dry-run");
+        console.log("signed               false");
+        console.log("submitted            false");
+        console.log("record               ", path);
+        console.log("router               ", router);
+        console.log("chain id             ", block.chainid);
+        console.log("planned read         configuration, token, adapters, provider links, immutable code");
+        console.log("planned read         admin grants; bounded guardian grant/revoke history from block");
+        console.log("history starts       ", record.readUint(".deployedAtBlock"));
+        console.log("expected admin       ", record.readAddress(".admin"));
+        console.log("expected guardian    ", record.readAddress(".guardian"));
+        console.log("public expected record", record);
+        console.log("live verification    pending; local identities are reviewed operator inputs");
+    }
+
+    function _artifactIdentity(string memory name, bytes memory creationCode) private view {
+        bytes32 expected = vm.envOr(name, bytes32(0));
+        require(expected != bytes32(0), "missing reviewed artifact identity");
+        require(expected == keccak256(creationCode), "artifact differs from reviewed identity");
+    }
+
+    function _publicCodeIdentity(address target, string memory name) private view {
+        require(
+            target != address(0) && vm.envOr(name, bytes32(0)) != bytes32(0),
+            "missing reviewed provider identity"
+        );
     }
 
     function _verifyProvenance(string memory record, HyperionRouter router) internal {

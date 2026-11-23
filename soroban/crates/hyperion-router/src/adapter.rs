@@ -59,3 +59,47 @@ pub trait PaidRailAdapter {
         gas_amount: i128,
     );
 }
+
+/// Revision-aware CCTP boundary. Other rail interfaces remain unchanged because they do not
+/// consume CCTP token mappings.
+#[soroban_sdk::contractclient(name = "CctpRailAdapterClient")]
+pub trait CctpRailAdapter {
+    #[allow(clippy::too_many_arguments)]
+    fn check_dispatch_revision(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        mapping_revision: u32,
+        destination_decimals: u32,
+        gas_amount: Option<i128>,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_revision(
+        env: Env,
+        caller: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        mapping_revision: u32,
+        destination_decimals: u32,
+        nonce: u64,
+    );
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_from_revision(
+        env: Env,
+        caller: Address,
+        sender: Address,
+        token: Address,
+        amount: i128,
+        destination_chain: String,
+        destination: BytesN<32>,
+        nonce: u64,
+        mapping_revision: u32,
+        destination_decimals: u32,
+        gas_amount: i128,
+    );
+}

@@ -327,6 +327,7 @@ impl World {
             destination: Destination {
                 chain: self.ethereum(),
                 address: self.evm(0x01),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,

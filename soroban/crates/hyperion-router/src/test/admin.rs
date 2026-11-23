@@ -289,6 +289,7 @@ fn moving_the_treasury_moves_where_the_fees_land() {
             destination: Destination {
                 chain: w.ethereum(),
                 address: super::doubles::evm_destination(&w.env, 0x22),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,
@@ -526,6 +527,7 @@ fn anybody_can_keep_the_bookkeeping_alive_and_it_costs_them_nothing_but_the_fee(
             destination: Destination {
                 chain: w.ethereum(),
                 address: super::doubles::evm_destination(&w.env, 0x33),
+                mapping_revision: 0,
             },
             destination_decimals: EVM_DECIMALS,
             min_destination_amount: 0,

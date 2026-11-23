@@ -78,6 +78,7 @@ export const SOROBAN_ERROR_NAMES = [
   "RequestExpired",
   "BatchLimitExceeded",
   "DestinationFlowLimitExceeded",
+  "StaleMapping",
 ] as const;
 
 export type SorobanErrorName = (typeof SOROBAN_ERROR_NAMES)[number];
@@ -134,6 +135,7 @@ export const EVM_ERROR_NAMES = [
   "TokenNotRegistered",
   "TokenDisabled",
   "TokenNotMapped",
+  "StaleMapping",
   "RailNotConfigured",
   "AlreadyConfigured",
   "ProtectedAsset",
@@ -420,6 +422,11 @@ const HELP: Record<HyperionErrorName, Omit<ErrorHelp, "sorobanCode" | "recovery"
   },
   TokenNotMapped: {
     summary: "This rail has no identifier on file for that token.",
+    fault: "config",
+    retryable: false,
+  },
+  StaleMapping: {
+    summary: "The token mapping changed; refresh the request before trying again.",
     fault: "config",
     retryable: false,
   },

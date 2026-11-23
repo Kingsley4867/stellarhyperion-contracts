@@ -196,6 +196,10 @@ abstract contract DeployConfig is Script {
         return vm.envBytes32("STELLAR_RAIL_RECIPIENT");
     }
 
+    function stellarCctpToken() internal view returns (bytes32) {
+        return vm.envBytes32("STELLAR_CCTP_TOKEN");
+    }
+
     /// @notice Hyperion's Axelar adapter on Stellar, in the form that chain's ITS puts on the wire.
     function stellarAxelarPeer() internal view returns (bytes memory) {
         return vm.envBytes("STELLAR_AXELAR_PEER");

@@ -1,4 +1,4 @@
-use super::setup::{net_of, World, EVM_DECIMALS, HUNDRED};
+use super::setup::{net_of, World, ETHEREUM_DOMAIN, EVM_DECIMALS, HUNDRED};
 use hyperion_core::{HyperionError, RouteKind};
 use hyperion_router::{Destination, OutboundRequest};
 use soroban_sdk::{
@@ -17,6 +17,7 @@ fn request(w: &World) -> OutboundRequest {
         destination: Destination {
             chain: w.ethereum(),
             address: BytesN::from_array(&w.env, &recipient),
+            mapping_revision: 1,
         },
         destination_decimals: EVM_DECIMALS,
         min_destination_amount: 0,
@@ -39,6 +40,28 @@ fn forwarding_budget_is_part_of_the_burn_and_never_an_extra_wallet_debit() {
     assert_eq!(w.token().balance(&w.user), before - HUNDRED);
     assert_eq!(w.token().balance(&w.adapter_id), 0);
     assert_eq!(w.token().allowance(&w.adapter_id, &w.messenger_id), 0);
+}
+
+#[test]
+fn stale_paid_dispatch_revision_is_rejected_before_transfer_or_burn() {
+    let w = World::new();
+    w.adapter().map_asset(
+        &ETHEREUM_DOMAIN,
+        &w.eth_usdc(),
+        &w.token_id,
+        &7,
+        &EVM_DECIMALS,
+        &2,
+    );
+    let before = w.token().balance(&w.user);
+
+    assert_eq!(
+        w.router()
+            .try_bridge_out_with_gas(&w.user, &request(&w), &1_000_000),
+        Err(Ok(HyperionError::StaleMapping))
+    );
+    assert_eq!(w.token().balance(&w.user), before);
+    assert_eq!(w.messenger().burn_count(), 0);
 }
 
 #[test]
@@ -79,7 +102,7 @@ fn strangers_and_restricted_destination_callers_cannot_request_forwarding() {
     let stranger = Address::generate(&w.env);
     let req = request(&w);
     assert_eq!(
-        w.adapter().try_dispatch_from(
+        w.adapter().try_dispatch_from_revision(
             &stranger,
             &w.user,
             &w.token_id,
@@ -87,6 +110,8 @@ fn strangers_and_restricted_destination_callers_cannot_request_forwarding() {
             &w.ethereum(),
             &req.destination.address,
             &1,
+            &1,
+            &EVM_DECIMALS,
             &1_000_000
         ),
         Err(Ok(HyperionError::Unauthorized))
@@ -130,7 +155,7 @@ fn a_wallet_signature_authorizes_the_exact_fee_and_burn_without_a_contract_signa
                     },
                     MockAuthInvoke {
                         contract: &w.adapter_id,
-                        fn_name: "dispatch_from",
+                        fn_name: "dispatch_from_revision",
                         args: (
                             w.router_id.clone(),
                             w.user.clone(),
@@ -139,6 +164,8 @@ fn a_wallet_signature_authorizes_the_exact_fee_and_burn_without_a_contract_signa
                             w.ethereum(),
                             req.destination.address.clone(),
                             1u64,
+                            1u32,
+                            EVM_DECIMALS,
                             1_000_000i128,
                         )
                             .into_val(&w.env),

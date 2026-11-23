@@ -9,6 +9,7 @@ import {
     NotMintRecipient,
     RailNotConfigured,
     ReplayedMessage,
+    StaleMapping,
     TokenNotMapped,
     UnexpectedRailContract,
     UnsupportedMessageVersion,
@@ -38,8 +39,8 @@ contract CctpInboundBoundaryTest is Fixture {
         receiver = new CctpAdapter(address(router), address(messenger), address(usdc), admin);
         vm.startPrank(admin);
         receiver.setMessageTransmitter(address(transmitter));
-        receiver.setLane(STELLAR, 27, REMOTE_ADAPTER);
-        receiver.setInboundLane(27, STELLAR, REMOTE_MESSENGER, REMOTE_ADAPTER, REMOTE_TOKEN);
+        receiver.setLane(STELLAR, 27, REMOTE_ADAPTER, REMOTE_TOKEN, 7);
+        receiver.setInboundLane(27, STELLAR, REMOTE_MESSENGER, REMOTE_ADAPTER, REMOTE_TOKEN, 7);
         vm.stopPrank();
         _setRailReceiver(RouteKind.Cctp, address(receiver));
     }
@@ -66,7 +67,7 @@ contract CctpInboundBoundaryTest is Fixture {
             uint256(0),
             uint256(0)
         );
-        return bytes.concat(header, burn, abi.encodePacked(uint8(1), bytes20(bob), uint64(42)));
+        return bytes.concat(header, burn, abi.encodePacked(uint8(2), uint32(1), bytes20(bob), uint64(42)));
     }
 
     function _replace(bytes memory message, uint256 offset, bytes memory value)
@@ -144,6 +145,28 @@ contract CctpInboundBoundaryTest is Fixture {
         assertEq(usdc.allowance(address(receiver), address(router)), 0);
     }
 
+    function test_stale_mapping_revision_refuses_before_circle_mints() public {
+        bytes memory stale = _message(keccak256("stale mapping"));
+        vm.prank(admin);
+        receiver.setInboundMapping(27, REMOTE_TOKEN, 7, 2);
+
+        CctpAdapter.InboundLane memory lane = receiver.inboundLaneOf(27);
+        assertEq(lane.localDecimals, 6);
+        assertEq(lane.remoteDecimals, 7);
+        assertEq(lane.mappingRevision, 2);
+
+        transmitter.setShouldRevert(true);
+        vm.expectRevert(StaleMapping.selector);
+        receiver.receiveMessage(stale, hex"51");
+        assertEq(transmitter.calls(), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+
+        bytes memory current = _replace(stale, 377, abi.encodePacked(uint32(2)));
+        transmitter.setShouldRevert(false);
+        receiver.receiveMessage(current, hex"51");
+        assertEq(usdc.balanceOf(bob), AMOUNT);
+    }
+
     function test_failed_provider_mint_recovery_is_atomic_and_retries() public {
         for (uint8 mode = 1; mode <= 8; ++mode) {
             if (mode == 6) continue;
@@ -209,7 +232,7 @@ contract CctpInboundBoundaryTest is Fixture {
         CctpAdapter fresh = new CctpAdapter(address(router), address(messenger), address(usdc), admin);
         vm.startPrank(admin);
         fresh.setMessageTransmitter(address(transmitter));
-        fresh.setLane(STELLAR, 27, REMOTE_ADAPTER);
+        fresh.setLane(STELLAR, 27, REMOTE_ADAPTER, REMOTE_TOKEN, 7);
         receiver.setLaneEnabled(STELLAR, false);
         vm.stopPrank();
         vm.expectRevert(RailNotConfigured.selector);
@@ -224,7 +247,7 @@ contract CctpInboundBoundaryTest is Fixture {
         receiver.receiveMessage(_message(bytes32(uint256(2))), hex"51");
         vm.prank(admin);
         vm.expectRevert(AlreadyConfigured.selector);
-        receiver.setInboundLane(27, STELLAR, REMOTE_ADAPTER, REMOTE_MESSENGER, REMOTE_TOKEN);
+        receiver.setInboundLane(27, STELLAR, REMOTE_ADAPTER, REMOTE_MESSENGER, REMOTE_TOKEN, 7);
     }
 
     function test_accepted_claim_survives_domain_disable_and_settles_once() public {

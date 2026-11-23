@@ -89,7 +89,7 @@ fn activation_rehearsal_executes_real_queued_actions_links_and_verifies_repeatab
     let token_id = BytesN::from_array(&w.env, &[0x33; 32]);
     let axelar_chain = String::from_str(&w.env, "ethereum-sepolia");
     cctp.link_domain(&w.ethereum(), &0, &caller);
-    cctp.map_asset(&0, &token_id, &w.token_id);
+    cctp.map_asset(&0, &token_id, &w.token_id, &7, &6, &1);
     axelar.link_chain(&w.ethereum(), &axelar_chain, &peer);
     axelar.map_token(&w.token_id, &token_id);
     axelar.set_destination_capability(
@@ -145,6 +145,7 @@ fn request(w: &World) -> OutboundRequest {
         destination: Destination {
             chain: w.ethereum(),
             address: evm_destination(&w.env, 0x11),
+            mapping_revision: 0,
         },
         destination_decimals: EVM_DECIMALS,
         min_destination_amount: 0,

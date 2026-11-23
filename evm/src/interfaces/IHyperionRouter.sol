@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {
     ActionAuditStatus,
     ActionKind,
+    ActionStatusView,
     AdminAction,
     CancelReason,
     ClaimSettlementResult,
@@ -485,6 +486,11 @@ interface IHyperionRouter {
     /// @notice Whether the action was cancelled; its original payload remains queryable.
     /// @param id The action to read.
     function actionCancelled(uint64 id) external view returns (bool);
+
+    /// @notice Read the typed lifecycle state at the current chain timestamp.
+    /// @dev The payload identity is keccak256(abi.encode(action)); existing IDs remain valid.
+    /// @param id The action to read.
+    function actionStatus(uint64 id) external view returns (ActionStatusView memory);
 
     /// @notice Read a parked claim.
     /// @param id The claim to read.

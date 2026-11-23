@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {Ownable} from "openzeppelin/access/Ownable.sol";
 import {Ownable2Step} from "openzeppelin/access/Ownable2Step.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "openzeppelin/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "openzeppelin/utils/ReentrancyGuard.sol";
 
@@ -11,12 +12,14 @@ import {
     AlreadyConfigured,
     DecimalOverflow,
     InvalidAmount,
+    InvalidDecimals,
     MalformedMessage,
     NotMintRecipient,
     NothingMinted,
     RailNotConfigured,
     RefundFailed,
     ReplayedMessage,
+    StaleMapping,
     TimelockDelayOutOfRange,
     TimelockNotQueued,
     TimelockNotReady,
@@ -140,6 +143,10 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
         uint32 domain;
         /// Hyperion's own adapter over there, in CCTP's thirty two byte form.
         bytes32 mintRecipient;
+        bytes32 remoteToken;
+        uint8 localDecimals;
+        uint8 remoteDecimals;
+        uint32 mappingRevision;
         bool configured;
         bool enabled;
     }
@@ -171,6 +178,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
         bytes32 tokenMessenger;
         bytes32 peer;
         bytes32 burnToken;
+        uint8 localDecimals;
+        uint8 remoteDecimals;
+        uint32 mappingRevision;
         bool configured;
         bool enabled;
     }
@@ -181,7 +191,14 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
     mapping(string chain => HistoricalPeer) private _historicalPeers;
 
     /// @notice A destination became reachable.
-    event LaneConfigured(string chain, uint32 domain, bytes32 mintRecipient);
+    event LaneConfigured(
+        string chain,
+        uint32 domain,
+        bytes32 mintRecipient,
+        bytes32 remoteToken,
+        uint8 remoteDecimals,
+        uint32 mappingRevision
+    );
 
     /// @notice A destination was turned on or off.
     event LaneEnabled(string chain, bool enabled);
@@ -217,7 +234,13 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
 
     /// @notice An inbound source domain was commissioned independently of outbound lanes.
     event InboundLaneConfigured(
-        uint32 indexed domain, string chain, bytes32 tokenMessenger, bytes32 peer, bytes32 burnToken
+        uint32 indexed domain,
+        string chain,
+        bytes32 tokenMessenger,
+        bytes32 peer,
+        bytes32 burnToken,
+        uint8 remoteDecimals,
+        uint32 mappingRevision
     );
 
     /// @notice An independently commissioned inbound domain was enabled or disabled.
@@ -281,9 +304,14 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
         lane = _lanes[destination.chain];
         if (!lane.configured) revert UnknownChain();
         if (!lane.enabled) revert RailNotConfigured();
+        if (
+            destination.mappingRevision != lane.mappingRevision
+                || destination.remoteDecimals != lane.remoteDecimals
+                || IERC20Metadata(USDC).decimals() != lane.localDecimals
+        ) revert StaleMapping();
 
         (AddressKind kind, bytes32 key, uint64 muxedId) = StellarAddress.parse(destination.strkey);
-        hookData = HyperionNotes.encodeCctpHook(kind, key, muxedId);
+        hookData = HyperionNotes.encodeCctpHook(kind, key, muxedId, destination.mappingRevision);
     }
 
     /// @inheritdoc IRailAdapter
@@ -421,6 +449,7 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
                 || _readUint32(message, 144) < FINALITY_THRESHOLD_FINALIZED
         ) revert MalformedMessage();
         if (_readBytes32(message, 152) != lane.burnToken) revert TokenNotMapped();
+        if (IERC20Metadata(USDC).decimals() != lane.localDecimals) revert StaleMapping();
         if (_readBytes32(message, 184) != bytes32(uint256(uint160(address(this))))) {
             revert NotMintRecipient();
         }
@@ -430,7 +459,9 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
         if (_readUint256(message, 280) != 0 || _readUint256(message, 312) != 0) revert InvalidAmount();
         uint256 expiration = _readUint256(message, 344);
         if (expiration != 0 && block.number >= expiration) revert MalformedMessage();
-        (payoutRecipient, sourceNonce) = HyperionNotes.decodeOutboundNote(message[376:]);
+        uint32 mappingRevision;
+        (payoutRecipient, sourceNonce, mappingRevision) = HyperionNotes.decodeCctpOutboundNote(message[376:]);
+        if (mappingRevision != lane.mappingRevision) revert StaleMapping();
         replayId = _readBytes32(message, 12);
     }
 
@@ -453,17 +484,49 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
     /// lane's mint recipient would move every future burn on it to a different contract, which is
     /// the same blast radius as swapping the adapter itself, so it is done the same way: deploy
     /// another adapter and let the router's timelock point at it.
-    function setLane(string calldata chain, uint32 domain, bytes32 mintRecipient) external onlyOwner {
+    function setLane(
+        string calldata chain,
+        uint32 domain,
+        bytes32 mintRecipient,
+        bytes32 remoteToken,
+        uint8 remoteDecimals
+    ) external onlyOwner {
         if (bytes(chain).length == 0) revert UnknownChain();
-        if (mintRecipient == bytes32(0)) revert ZeroAddress();
+        if (mintRecipient == bytes32(0) || remoteToken == bytes32(0)) revert ZeroAddress();
         Lane storage lane = _lanes[chain];
         if (lane.configured) revert AlreadyConfigured();
+        uint8 localDecimals = IERC20Metadata(USDC).decimals();
+        if (localDecimals > 38 || remoteDecimals == 0 || remoteDecimals > 38) {
+            revert InvalidDecimals();
+        }
         lane.domain = domain;
         lane.mintRecipient = mintRecipient;
+        lane.remoteToken = remoteToken;
+        lane.localDecimals = localDecimals;
+        lane.remoteDecimals = remoteDecimals;
+        lane.mappingRevision = 1;
         lane.configured = true;
         lane.enabled = true;
-        emit LaneConfigured(chain, domain, mintRecipient);
+        emit LaneConfigured(chain, domain, mintRecipient, remoteToken, remoteDecimals, 1);
         emit LaneEnabled(chain, true);
+    }
+
+    /// @notice Advance a destination token mapping without accepting older in-flight revisions.
+    function setLaneMapping(string calldata chain, bytes32 remoteToken, uint8 remoteDecimals, uint32 revision)
+        external
+        onlyOwner
+    {
+        Lane storage lane = _lanes[chain];
+        if (!lane.configured) revert RailNotConfigured();
+        if (
+            remoteToken == bytes32(0) || revision <= lane.mappingRevision
+                || IERC20Metadata(USDC).decimals() != lane.localDecimals
+        ) revert StaleMapping();
+        if (remoteDecimals == 0 || remoteDecimals > 38) revert InvalidDecimals();
+        lane.remoteToken = remoteToken;
+        lane.remoteDecimals = remoteDecimals;
+        lane.mappingRevision = revision;
+        emit LaneConfigured(chain, lane.domain, lane.mintRecipient, remoteToken, remoteDecimals, revision);
     }
 
     /// @notice Commission inbound identities without granting any trust from an outbound lane.
@@ -473,23 +536,51 @@ contract CctpAdapter is IRailAdapter, Ownable2Step, ReentrancyGuard {
         string calldata chain,
         bytes32 tokenMessenger,
         bytes32 peer,
-        bytes32 burnToken
+        bytes32 burnToken,
+        uint8 remoteDecimals
     ) external onlyOwner {
         if (bytes(chain).length == 0) revert UnknownChain();
         if (tokenMessenger == bytes32(0) || peer == bytes32(0) || burnToken == bytes32(0)) {
             revert ZeroAddress();
         }
         if (_inboundLanes[domain].configured) revert AlreadyConfigured();
+        uint8 localDecimals = IERC20Metadata(USDC).decimals();
+        if (localDecimals > 38 || remoteDecimals == 0 || remoteDecimals > 38) {
+            revert InvalidDecimals();
+        }
         _inboundLanes[domain] = InboundLane({
             chain: chain,
             tokenMessenger: tokenMessenger,
             peer: peer,
             burnToken: burnToken,
+            localDecimals: localDecimals,
+            remoteDecimals: remoteDecimals,
+            mappingRevision: 1,
             configured: true,
             enabled: true
         });
-        emit InboundLaneConfigured(domain, chain, tokenMessenger, peer, burnToken);
+        emit InboundLaneConfigured(domain, chain, tokenMessenger, peer, burnToken, remoteDecimals, 1);
         emit InboundLaneEnabled(domain, true);
+    }
+
+    /// @notice Advance a source token mapping; older messages fail before Circle's mint call.
+    function setInboundMapping(uint32 domain, bytes32 burnToken, uint8 remoteDecimals, uint32 revision)
+        external
+        onlyOwner
+    {
+        InboundLane storage lane = _inboundLanes[domain];
+        if (!lane.configured) revert RailNotConfigured();
+        if (
+            burnToken == bytes32(0) || revision <= lane.mappingRevision
+                || IERC20Metadata(USDC).decimals() != lane.localDecimals
+        ) revert StaleMapping();
+        if (remoteDecimals == 0 || remoteDecimals > 38) revert InvalidDecimals();
+        lane.burnToken = burnToken;
+        lane.remoteDecimals = remoteDecimals;
+        lane.mappingRevision = revision;
+        emit InboundLaneConfigured(
+            domain, lane.chain, lane.tokenMessenger, lane.peer, burnToken, remoteDecimals, revision
+        );
     }
 
     /// @notice Disable or re-enable an already commissioned inbound domain, preserving accepted claims.

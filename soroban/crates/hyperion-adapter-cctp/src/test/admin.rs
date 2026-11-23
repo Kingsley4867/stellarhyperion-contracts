@@ -3,7 +3,7 @@
 use hyperion_core::{cctp, HyperionError};
 use soroban_sdk::{testutils::Address as _, Address, BytesN, String};
 
-use super::setup::{World, ETHEREUM_DOMAIN, ETH_USDC, UNLINKED_DOMAIN};
+use super::setup::{World, ETHEREUM_DOMAIN, ETH_USDC, EVM_DECIMALS, UNLINKED_DOMAIN};
 use crate::{CctpAdapter, CctpAdapterClient, FinalityPolicy};
 
 #[test]
@@ -159,8 +159,14 @@ fn an_asset_cannot_be_mapped_onto_a_domain_nobody_linked() {
     // The order matters. A mapping on an unlinked domain would be unreachable on the way in,
     // because the inbound path needs the chain name before it looks for the asset.
     assert_eq!(
-        w.adapter()
-            .try_map_asset(&ETHEREUM_DOMAIN, &w.eth_usdc(), &w.token_id),
+        w.adapter().try_map_asset(
+            &ETHEREUM_DOMAIN,
+            &w.eth_usdc(),
+            &w.token_id,
+            &7,
+            &EVM_DECIMALS,
+            &1,
+        ),
         Err(Ok(HyperionError::UnknownChain))
     );
 }
@@ -194,6 +200,9 @@ fn nobody_but_the_admin_can_add_an_asset() {
         &ETHEREUM_DOMAIN,
         &BytesN::from_array(&w.env, &ETH_USDC),
         &w.token_id,
+        &7,
+        &EVM_DECIMALS,
+        &1,
     );
 }
 

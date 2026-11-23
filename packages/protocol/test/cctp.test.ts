@@ -6,7 +6,7 @@ import {
   BURN_MESSAGE_VERSION,
   DOCUMENTED_RESIDUAL_ALLOWANCE,
   FINALITY_THRESHOLD_FINALIZED,
-  HOOK_VERSION,
+  CCTP_HOOK_VERSION,
   MESSAGE_VERSION,
   MSG_BODY,
   STELLAR_DOMAIN,
@@ -225,15 +225,15 @@ describe("the hook", () => {
   });
 
   it("carries a Stellar destination when there is one", () => {
-    const hook = encodeCctpHook(G_ADDR);
+    const hook = encodeCctpHook(G_ADDR, 1);
     const raw = buildMessage({
       body: buildBurnBody({ amount: 1n, mintRecipient: "beef", hook }),
     });
     expect(toHex(cctpHookData(cctpBody(raw)))).toBe(toHex(hook));
   });
 
-  it("shares its version with the Axelar note", () => {
-    expect(HOOK_VERSION).toBe(1);
+  it("uses the revision-bound Hyperion hook version", () => {
+    expect(CCTP_HOOK_VERSION).toBe(2);
   });
 });
 

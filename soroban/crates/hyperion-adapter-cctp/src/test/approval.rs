@@ -2,7 +2,9 @@
 use hyperion_core::{cctp::ApprovalFinding, HyperionError};
 use soroban_sdk::{contract, contractimpl, contracttype, testutils::Events, Address, BytesN, Env};
 
-use super::setup::{World, HUNDRED};
+use crate::{storage, types::TokenMapping};
+
+use super::setup::{World, ETHEREUM_DOMAIN, EVM_DECIMALS, HUNDRED};
 
 #[contracttype]
 #[derive(Clone)]
@@ -18,6 +20,10 @@ struct ApprovalToken;
 
 #[contractimpl]
 impl ApprovalToken {
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
     pub fn set_mode(env: Env, mode: u32) {
         env.storage().instance().set(&TokenKey::Mode, &mode);
     }
@@ -107,10 +113,25 @@ fn inconsistent_approval_or_failed_cleanup_rolls_back_both_dispatch_paths() {
             let owner = if paid { &w.user } else { &w.adapter_id };
             token.mint(owner, &HUNDRED);
             token.set_mode(&mode);
-            let destination = BytesN::from_array(&w.env, &[1; 32]);
+            let mut destination_bytes = [0u8; 32];
+            destination_bytes[12..].fill(1);
+            let destination = BytesN::from_array(&w.env, &destination_bytes);
+            w.env.as_contract(&w.adapter_id, || {
+                storage::set_asset(
+                    &w.env,
+                    ETHEREUM_DOMAIN,
+                    &TokenMapping {
+                        local: token_id.clone(),
+                        remote: BytesN::from_array(&w.env, &[0x99; 32]),
+                        revision: 1,
+                        local_decimals: 7,
+                        remote_decimals: EVM_DECIMALS,
+                    },
+                );
+            });
             let events_before = w.env.events().all();
             let result = if paid {
-                w.adapter().try_dispatch_from(
+                w.adapter().try_dispatch_from_revision(
                     &w.router_id,
                     &w.user,
                     &token_id,
@@ -118,15 +139,19 @@ fn inconsistent_approval_or_failed_cleanup_rolls_back_both_dispatch_paths() {
                     &w.ethereum(),
                     &destination,
                     &1,
+                    &1,
+                    &EVM_DECIMALS,
                     &1_000_000,
                 )
             } else {
-                w.adapter().try_dispatch(
+                w.adapter().try_dispatch_revision(
                     &w.router_id,
                     &token_id,
                     &HUNDRED,
                     &w.ethereum(),
                     &destination,
+                    &1,
+                    &EVM_DECIMALS,
                     &1,
                 )
             };
@@ -140,13 +165,17 @@ fn inconsistent_approval_or_failed_cleanup_rolls_back_both_dispatch_paths() {
             }
             assert_eq!(token.allowance(&w.adapter_id, &w.messenger_id), 0);
             assert_eq!(token.burned(), 0);
-            assert!(w.env.events().all() == events_before);
+            assert_eq!(
+                w.env.events().all(),
+                events_before,
+                "paid={paid}, mode={mode}"
+            );
             assert_eq!(w.messenger().burn_count(), 0);
             assert!(w.messenger().try_last_burn().is_err());
             assert!(w.messenger().last_hook().is_empty());
             token.set_mode(&0);
             if paid {
-                w.adapter().dispatch_from(
+                w.adapter().dispatch_from_revision(
                     &w.router_id,
                     &w.user,
                     &token_id,
@@ -154,15 +183,19 @@ fn inconsistent_approval_or_failed_cleanup_rolls_back_both_dispatch_paths() {
                     &w.ethereum(),
                     &destination,
                     &1,
+                    &1,
+                    &EVM_DECIMALS,
                     &1_000_000,
                 );
             } else {
-                w.adapter().dispatch(
+                w.adapter().dispatch_revision(
                     &w.router_id,
                     &token_id,
                     &HUNDRED,
                     &w.ethereum(),
                     &destination,
+                    &1,
+                    &EVM_DECIMALS,
                     &1,
                 );
             }

@@ -17,6 +17,22 @@ The wallet-owned router and ITS adapter were deployed with the dedicated `hyperi
 
 The received asset is the ITS representation of Stellar USDC, not Circle's native Sepolia USDC. Route 1 sends directly to the recipient through ITS and needs no EVM Hyperion adapter.
 
+## CCTP EVM inbound development gate
+
+The EVM CCTP adapter's inbound receiver is development-only and disabled for every source domain
+by default. Configuring an outbound lane or remote sender does not enable inbound minting. A
+validated EVM deployment must independently verify its Circle domain, remote messenger, native
+USDC mapping, hook compatibility, transmitter behavior, replay handling, and claim recovery, then
+explicitly call `setInboundEnabled(domain, true)` as owner. The EVM deployment script intentionally
+does not enable this gate. Local tests use a mock transmitter and are rehearsal evidence, not
+provider or deployment validation.
+
+The gate is additive storage on the non-proxy EVM adapter; an existing deployed adapter cannot
+acquire it in place. Migration therefore means deploying and verifying a new adapter, preserving
+the reviewed outbound settings, independently validating the inbound lane, and changing router
+registration only through its normal timelock. Do not treat this development path as an active
+Stellar Testnet EVM route.
+
 ## Axelar capability admission and upgrade compatibility
 
 The adapter now stores an explicit capability for each `(Hyperion chain, ITS token id)` pair. A
@@ -54,6 +70,58 @@ The current router uses WASM `281d946ea78b194c0ef44ad9488ed02b2aa6912fb4f6fbab52
 
 The older deployment is preserved in `deployments/archive/stellar-testnet-2026-10-01.json`. Its separate admin upgrade instructions are historical in `docs/LEGACY_TESTNET_UPGRADE.md`. Do not run those old-address commands against this fresh deployment.
 
+## Cross-repository deployment copies
+
+`deployments/stellar-testnet-phase1.json` is the canonical record. The backend and frontend carry
+their own copies, and each is deployed from its own commit, so "the copies agree" is a question
+about three revisions rather than one working tree. Check it without signing or writing anything:
+
+```sh
+script/stellar/check-deployment-copies.sh \
+  --copy stellarhyperion-backend=git:../stellarhyperion-backend:$BACKEND_COMMIT:deployments/stellar-testnet-phase1.json \
+  --copy stellarhyperion-frontend=git:../stellarhyperion-frontend:$FRONTEND_COMMIT:deployments/stellar-testnet-phase1.json
+```
+
+Every copy is read out of a local Git object at a full 40-character commit (`git show`), so the
+report names the commit it compared. A short SHA, an unfetched commit, a path outside the
+repository or a copy that describes another network is refused rather than guessed. Working-tree
+rehearsal is possible with `--copy frontend=file:/tmp/copy.json --allow-working-tree`; the report
+labels that revision as not reproducible.
+
+The command prints one JSON report. Each disagreement carries the exact dotted field path
+(`networks.stellar-testnet.tokens.USDC.flowLimit`), the owning repository, the kind
+(`value`, `integer`, `missing`, `unexpected`, `route-set`, `length`, `type`, `archived-copy`,
+`gated-rail`, `unbacked-route` or `unsafe-integer`), the severity and both values.
+`owningRepositories` names whose change fixes it: a consumer label for a copy-side difference,
+`stellarhyperion-contracts` for a canonical-side inconsistency. It exits 0 only when every
+compared copy agrees. Route membership is compared as a set because it is a set on the wire;
+every other array is positional.
+
+Integer amounts are compared as exact decimal integers, never as floating point: a flow limit of
+`123456789012345678901234` must match digit for digit, and a copy storing an integer outside the
+exact numeric range is reported as `unsafe-integer` instead of being compared with a rounded value.
+Stellar contract IDs, account addresses, issuers and passphrases compare case-sensitively; EVM
+addresses compare semantically.
+
+Archived records are distinguished from the active manifest rather than diffed against it. A copy
+whose lifecycle is `archived`, `deprecated` or `retired`, or that was read from an archive path,
+produces a single `archived-copy` finding naming its successor; field-by-field differences are not
+reported for it. A canonical record that is itself archived is refused unless `--allow-archived` is
+passed for a deliberately historical comparison, in which case an active copy becomes the finding.
+
+This command is read-only: it does not sign, submit, or write a consumer copy, and `--out` refuses
+to point at a compared working-tree copy. `wroteConsumerCopies` is always `false` in the report.
+Updating a copy remains a separate reviewed change in that repository, made against the canonical
+record and re-checked here.
+
+Compatibility and migration: this adds a read-only check and no wire-format change. Records that
+already validate with `parseDeploymentSet` need no edits, and a consumer that has not yet adopted
+the full record shape can be compared locally with `file:` and `--allow-working-tree` while its
+copy is migrated. The active deployment remains Stellar Testnet outbound ITS/CCTP; EVM and other
+rail copies stay explicitly gated, and a canonical family other than `stellar` is refused. The EVM
+verifier `evm/script/Verify.s.sol` still checks a live EVM chain against an EVM record; it does not
+compare cross-repository copies, and this command does not activate an EVM lane.
+
 ## Deprecated and archived deployments
 
 Deprecation is a status change, not a deletion. Archived records remain in the repository and their transaction evidence is retained in full; only their operational authority is withdrawn.
@@ -76,6 +144,72 @@ Actionable warnings for consumers:
 - Do not run the legacy upgrade instructions in `docs/LEGACY_TESTNET_UPGRADE.md` against the successor; they target retired addresses.
 
 Compatibility and migration: existing consumers that read only the active record are unaffected. Consumers that enumerate archive files must parse `status` and `successor` before use. Tools that previously accepted the archived router without checking status must be updated to refuse it; this is a breaking change for those tools and is listed here so it can be planned.
+
+## Dry-run deployment and activation plans
+
+Deployment and activation scripts expose `HYPERION_DRY_RUN=1` for a durable, unsigned plan:
+
+```bash
+HYPERION_DRY_RUN=1 script/stellar/deploy.sh
+HYPERION_DRY_RUN=1 script/stellar/link.sh
+HYPERION_DRY_RUN=1 script/stellar/execute.sh
+HYPERION_DRY_RUN=1 script/stellar/verify.sh
+HYPERION_DRY_RUN=1 HYPERION_RECORD=/tmp/phase1.json \
+  node script/stellar/write-record.mjs /tmp/phase1.plan.json
+```
+
+Dry-run mode validates required WASM files or deployment records, refuses unknown code identities,
+and emits ordered operations with `signed: false` and `submitted: false`. It never calls
+`stellar keys address`, reads secret material, signs, uploads, deploys, queues or executes.
+Execution plans preserve provider linking before router execution and mark every action as requiring
+the existing timelock maturity. The EVM verification script is development-only and can also use
+`HYPERION_DRY_RUN=1`; no live EVM activation is enabled by this plan.
+
+Supply reviewed lowercase SHA256 values in `ROUTER_HASH`, `CCTP_HASH` and `AXELAR_HASH`,
+or in the selected record's `wasmHashes`. `HYPERION_WASM_DIR` selects the actual artifact
+directory; the default is `soroban/target/wasm32v1-none/release`. Every required artifact must
+be a valid WASM within the unchanged 65,536-byte limit with the expected exported interface
+and contract specification. Deployment plans check all three artifacts. Record plans check
+the deployed router and adapters. The selected record must name exactly one matching network.
+
+`HYPERION_DEPLOYER`, `HYPERION_ADMIN`, `HYPERION_GUARDIAN` and `HYPERION_TREASURY` are
+public account addresses. Planning never resolves a wallet alias. Provider addresses require
+reviewed code identities: `HYPERION_CODE_IDENTITIES` names a public JSON file mapping contract
+IDs to SHA256 hashes. Records can retain these as `providerCodeHashes` and retain addresses
+as `providers.cctpTokenMessenger`, `providers.cctpMessageTransmitter` and `providers.axelarIts`.
+These are reviewed operator inputs, not fresh proof of live code. A separate live verification
+must compare current code and provider links before activation. Optional providers remain gated
+when absent from a deployment plan; records with deployed adapters require their identities.
+
+Link plans require `CCTP_PEER_DOMAIN`, `CCTP_DESTINATION_CALLER`, `CCTP_PEER_BURN_TOKEN`,
+`AXELAR_PEER_CHAIN`, `AXELAR_PEER_ADDRESS` and `AXELAR_TOKEN_ID` for the selected rails.
+Deploy output references such as `@router`, `@adapter-cctp`, and `@action.id[sequence]`
+represent outputs captured by earlier operations. Provider linking precedes route activation;
+admin handover executes last. Every execution remains subject to the existing timelock.
+
+Execute plans require full public queued action snapshots, either `queuedActionDetails` in the
+record or a JSON file selected by `HYPERION_QUEUED_ACTIONS`. Each entry contains exact `id`,
+`queued_at`, `eta`, `expires_at` and `action`, in the order of `queuedActionIds`. Use canonical
+decimal strings for u64 values above JavaScript's safe integer range. Missing, terminal,
+duplicate or inconsistent proposals block the plan. This phase-two planner accepts activation
+actions only; other governance actions use their dedicated reviewed tooling. Older records
+without snapshots require the public snapshot file; this does not change any on-chain format.
+
+Record writer planning additionally requires `HYPERION_SOURCE_COMMIT` (a reviewed full source
+revision) and an explicit public deployment ledger (`HYPERION_ROUTER_LEDGER`, `ROUTER_LEDGER`
+or `STELLAR_START_LEDGER`). It does not query Git or RPC and writes no deployment record.
+`QUEUE_DETAILS_JSON` can retain full public queue snapshots when writing a record.
+Historical archive records remain writable evidence; they remain ineligible for activation.
+
+EVM verification planning uses Foundry's boolean `HYPERION_DRY_RUN=true`. It validates the local
+compiler profile, selected record and public configuration before emitting its read plan.
+`HYPERION_ROUTER_ARTIFACT_HASH`, `HYPERION_CCTP_ARTIFACT_HASH` and optional
+`HYPERION_AXELAR_ARTIFACT_HASH` are reviewed Keccak256 hashes of the compiled creation bytecode.
+Provider identities use `CCTP_TOKEN_MESSENGER_CODE_HASH`, `CCTP_MESSAGE_TRANSMITTER_CODE_HASH`,
+and optional `AXELAR_ITS_CODE_HASH` and `AXELAR_GAS_SERVICE_CODE_HASH`. The plan reads no live
+contract or RPC and does not certify a deployment. EVM grants remain additive until an actor
+explicitly renounces its role; Soroban administration replaces the configured actor. Generated
+authority tests preserve these chain-specific policies without changing production permissions.
 
 ## Verified acceptance transfer
 

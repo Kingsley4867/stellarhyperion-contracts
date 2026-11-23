@@ -95,6 +95,13 @@ pub struct Received {
     pub claim_id: u64,
 }
 
+/// The bounded window in which raw epoch-zero provider digests are still accepted.
+#[contractevent(topics = ["hyperion", "abr_cfg"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAttestationWindowSet {
+    pub valid_until: u64,
+}
+
 #[contractevent(topics = ["hyperion", "abr_cfg"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatorSet {

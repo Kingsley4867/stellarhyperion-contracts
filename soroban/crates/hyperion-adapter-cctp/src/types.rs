@@ -1,5 +1,16 @@
 use soroban_sdk::{contracttype, Address, BytesN, String};
 
+/// A locally verified CCTP token pair. Revisions are monotonically increasing per remote token.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenMapping {
+    pub local: Address,
+    pub remote: BytesN<32>,
+    pub revision: u32,
+    pub local_decimals: u32,
+    pub remote_decimals: u32,
+}
+
 /// The finality requirement selected for one CCTP destination lane.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

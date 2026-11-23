@@ -441,19 +441,33 @@ _This is a v0.1 planning document, not a security review. Treat every contract a
 
 Allbridge remains a development adapter and is not activated on Stellar Testnet. Fresh validator
 configuration starts at epoch one. Its Ed25519 signature covers SHA-256 of the literal ASCII
-`HYPERION_ALLBRIDGE_VALIDATOR_V1`, the 32-byte ledger network ID, the 32-byte adapter contract key,
-the big-endian u32 epoch, the 32-byte validator public key, and the existing 32-byte Allbridge
-message digest, concatenated in that order. The provider digest remains the replay identity across
-all epochs. Changing the key, epoch, network or adapter invalidates the signature.
+`HYPERION_ALLBRIDGE_VALIDATOR_V2`, the big-endian u32 route tag (`Allbridge = 3`), the 32-byte
+ledger network ID, the 32-byte adapter contract key, the big-endian u32 epoch, the 32-byte validator
+public key, and the 32-byte Allbridge provider message digest, concatenated in that order. The
+provider digest covers the exact integer amount, recipient word, source and destination chain ids,
+receive token and nonce; the provider digest remains the replay identity across all epochs.
+Changing the route, key, epoch, network or adapter invalidates the signature, so a signature
+produced for another adapter or another Stellar network cannot be presented here.
 
-An upgraded deployment with only the existing `Validator` key retains epoch zero and its legacy
-provider-digest signatures. Calling `set_validator` with that same key records this compatibility
-state; it cannot replace an active key. A replacement key is queued for 3,600 seconds and activated
-separately. Epoch-zero migration activates signed epoch one. Fresh epoch-one deployments require
-the domain-bound signatures immediately. Coordinators must update signers and commission matching
-wire fixtures before activation. Historical provider digests retain replay protection, and a key
-rotated away and later restored cannot reuse an old signed-epoch signature. Timestamp and epoch
-overflow fail closed; pending proposals can be cancelled without moving the active key.
+The V1 envelope and the raw pre-envelope provider digest are not accepted by a fresh deployment.
+An upgraded deployment that still has only the `Validator` key retains epoch zero, and its raw
+provider-digest signatures are accepted only inside an explicit migration window. The window is
+closed by default, may be opened by the admin for at most seven days with
+`enable_legacy_attestations(valid_until)`, can be closed early with `disable_legacy_attestations`,
+and refuses further deliveries with `RequestExpired` once it elapses. Raw digests carry no network
+or adapter binding; keeping the window short and closed by default is the constraint that limits
+that exposure. Calling `set_validator` with the same key records the compatibility state; it cannot
+replace an active key. A replacement key is queued for 3,600 seconds and activated separately.
+Epoch-zero migration activates signed epoch one. Fresh epoch-one deployments require the
+domain-bound envelope immediately. Coordinators must update signers and commission matching wire
+fixtures before activation. Historical provider digests retain replay protection, and a key rotated
+away and later restored cannot reuse an old signed-epoch signature. Timestamp and epoch overflow
+fail closed; pending proposals can be cancelled without moving the active key.
+
+This is a wire-format change. Any coordinator fixture that signs the old V1 layout or the raw
+provider digest must move to V2 before an upgraded deployment can process its messages; neither
+older form is silently accepted. EVM and other non-Allbridge rails are out of scope here and stay
+explicitly gated until independently validated.
 
 Emergency disable blocks new inbound and outbound custody. It leaves queued validator changes,
 processed provider digests, fixed-recipient parked claims and their liabilities intact. Existing

@@ -239,8 +239,10 @@ impl BurnMessage {
 // Hyperion's hook payload
 // ------------------------------------------------------------------------------------------
 
-/// Version byte on Hyperion's own hook payload.
-pub const HOOK_VERSION: u8 = 1;
+/// Version byte on Hyperion's revision-bound CCTP hook payload.
+pub const HOOK_VERSION: u8 = 2;
+/// Fixed length of the revision-bound Stellar-to-EVM outbound note.
+pub const CCTP_OUTBOUND_NOTE_LEN: u32 = 33;
 
 /// What Hyperion's EVM side writes into a CCTP hook so the Stellar side knows where to pay.
 ///
@@ -250,7 +252,16 @@ pub const HOOK_VERSION: u8 = 1;
 /// and the mint recipient is simply the adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HyperionHook {
+    pub mapping_revision: u32,
     pub destination: StellarDestination,
+}
+
+/// CCTP outbound note for EVM settlement: version, mapping revision, recipient, router nonce.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CctpOutboundNote {
+    pub mapping_revision: u32,
+    pub recipient: BytesN<32>,
+    pub router_nonce: u64,
 }
 
 /// Verify the separately commissioned Hyperion burn sender after header messenger authentication.
@@ -266,15 +277,25 @@ pub fn verify_remote_sender(
 }
 
 impl HyperionHook {
-    pub fn new(destination: StellarDestination) -> Self {
-        Self { destination }
+    pub fn new(mapping_revision: u32, destination: StellarDestination) -> Self {
+        Self {
+            mapping_revision,
+            destination,
+        }
     }
 
     /// Serialise as `[version][kind][32 byte key][8 byte muxed id, muxed only]`.
     pub fn encode(&self, env: &Env) -> Result<Bytes, HyperionError> {
+        if self.mapping_revision == 0 {
+            return Err(HyperionError::StaleMapping);
+        }
         self.destination.validate()?;
         let mut out = Bytes::new(env);
         out.push_back(HOOK_VERSION);
+        out.append(&Bytes::from_slice(
+            env,
+            &self.mapping_revision.to_be_bytes(),
+        ));
         out.append(&self.destination.encode(env));
         Ok(out)
     }
@@ -284,17 +305,29 @@ impl HyperionHook {
     /// An unknown version is refused rather than skipped past. A payload we cannot read is a
     /// destination we would be guessing at, and guessing here means paying the wrong person.
     pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
-        if raw.is_empty() {
+        if raw.len() < 5 {
             return Err(HyperionError::InvalidDestination);
         }
         let version = raw.get(0).ok_or(HyperionError::InvalidDestination)?;
         if version != HOOK_VERSION {
             return Err(HyperionError::UnsupportedHookVersion);
         }
-        let body = raw.slice(1..raw.len());
+        let revision = u32::from_be_bytes([
+            raw.get(1).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(2).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(3).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(4).ok_or(HyperionError::MalformedMessage)?,
+        ]);
+        if revision == 0 {
+            return Err(HyperionError::StaleMapping);
+        }
+        let body = raw.slice(5..raw.len());
         let destination = StellarDestination::decode(env, &body)?;
         destination.validate()?;
-        Ok(Self { destination })
+        Ok(Self {
+            mapping_revision: revision,
+            destination,
+        })
     }
 
     /// Whether this destination can be paid without its owner opting in first.
@@ -304,6 +337,64 @@ impl HyperionHook {
 
     pub fn kind(&self) -> AddressKind {
         self.destination.kind
+    }
+}
+
+impl CctpOutboundNote {
+    pub fn encode(&self, env: &Env) -> Result<Bytes, HyperionError> {
+        if self.mapping_revision == 0 {
+            return Err(HyperionError::StaleMapping);
+        }
+        let recipient = self.recipient.to_array();
+        if recipient[..12].iter().any(|byte| *byte != 0)
+            || recipient[12..].iter().all(|byte| *byte == 0)
+        {
+            return Err(HyperionError::NotEvmAddress);
+        }
+        let mut out = Bytes::new(env);
+        out.push_back(HOOK_VERSION);
+        out.append(&Bytes::from_slice(
+            env,
+            &self.mapping_revision.to_be_bytes(),
+        ));
+        out.append(&Bytes::from_slice(env, &recipient[12..]));
+        out.append(&Bytes::from_slice(env, &self.router_nonce.to_be_bytes()));
+        Ok(out)
+    }
+
+    pub fn decode(env: &Env, raw: &Bytes) -> Result<Self, HyperionError> {
+        if raw.len() != CCTP_OUTBOUND_NOTE_LEN || raw.get(0) != Some(HOOK_VERSION) {
+            return Err(HyperionError::MalformedMessage);
+        }
+        let mapping_revision = u32::from_be_bytes([
+            raw.get(1).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(2).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(3).ok_or(HyperionError::MalformedMessage)?,
+            raw.get(4).ok_or(HyperionError::MalformedMessage)?,
+        ]);
+        if mapping_revision == 0 {
+            return Err(HyperionError::StaleMapping);
+        }
+        let mut recipient = [0u8; 32];
+        let mut i = 0u32;
+        while i < 20 {
+            recipient[(i + 12) as usize] = raw.get(i + 5).ok_or(HyperionError::MalformedMessage)?;
+            i += 1;
+        }
+        if recipient[12..].iter().all(|byte| *byte == 0) {
+            return Err(HyperionError::InvalidDestination);
+        }
+        let mut nonce = [0u8; 8];
+        i = 0;
+        while i < 8 {
+            nonce[i as usize] = raw.get(i + 25).ok_or(HyperionError::MalformedMessage)?;
+            i += 1;
+        }
+        Ok(Self {
+            mapping_revision,
+            recipient: BytesN::from_array(env, &recipient),
+            router_nonce: u64::from_be_bytes(nonce),
+        })
     }
 }
 
@@ -634,7 +725,7 @@ mod tests {
             StellarDestination::contract(BytesN::from_array(&env, &[0x22u8; 32])),
             StellarDestination::muxed(BytesN::from_array(&env, &[0x23u8; 32]), 9_000_001),
         ] {
-            let hook = HyperionHook::new(destination.clone());
+            let hook = HyperionHook::new(1, destination.clone());
             let wire = hook.encode(&env).unwrap();
             assert_eq!(HyperionHook::decode(&env, &wire).unwrap(), hook);
             assert_eq!(
@@ -648,7 +739,9 @@ mod tests {
     fn a_hook_travels_inside_a_burn_message_without_being_disturbed() {
         let env = Env::default();
         let destination = StellarDestination::account(BytesN::from_array(&env, &[0x31u8; 32]));
-        let wire = HyperionHook::new(destination.clone()).encode(&env).unwrap();
+        let wire = HyperionHook::new(1, destination.clone())
+            .encode(&env)
+            .unwrap();
         let body = burn_body(&env, 500, &wire);
 
         let recovered = BurnMessage::hook_data(&body).unwrap();
@@ -664,6 +757,7 @@ mod tests {
         let env = Env::default();
         let mut wire = Bytes::new(&env);
         wire.push_back(99);
+        wire.append(&Bytes::from_slice(&env, &1u32.to_be_bytes()));
         wire.append(
             &StellarDestination::account(BytesN::from_array(&env, &[0x41u8; 32])).encode(&env),
         );
@@ -687,6 +781,7 @@ mod tests {
         let env = Env::default();
         let mut wire = Bytes::new(&env);
         wire.push_back(HOOK_VERSION);
+        wire.append(&Bytes::from_slice(&env, &1u32.to_be_bytes()));
         wire.append(
             &StellarDestination::account(BytesN::from_array(&env, &[0u8; 32])).encode(&env),
         );
@@ -699,19 +794,46 @@ mod tests {
     #[test]
     fn a_hook_says_whether_the_recipient_has_to_opt_in_first() {
         let env = Env::default();
-        let account = HyperionHook::new(StellarDestination::account(BytesN::from_array(
-            &env,
-            &[0x51u8; 32],
-        )));
-        let contract = HyperionHook::new(StellarDestination::contract(BytesN::from_array(
-            &env,
-            &[0x52u8; 32],
-        )));
+        let account = HyperionHook::new(
+            1,
+            StellarDestination::account(BytesN::from_array(&env, &[0x51u8; 32])),
+        );
+        let contract = HyperionHook::new(
+            1,
+            StellarDestination::contract(BytesN::from_array(&env, &[0x52u8; 32])),
+        );
         // A classic account needs a trustline and a contract does not, which decides whether a
         // delivery can go straight through or has to be parked.
         assert!(account.needs_trustline());
         assert!(!contract.needs_trustline());
         assert_eq!(account.kind(), AddressKind::Account);
+    }
+
+    #[test]
+    fn cctp_outbound_note_binds_the_mapping_revision_recipient_and_nonce() {
+        let env = Env::default();
+        let mut recipient = [0u8; 32];
+        recipient[12..].copy_from_slice(&[0xA1u8; 20]);
+        let note = CctpOutboundNote {
+            mapping_revision: 7,
+            recipient: BytesN::from_array(&env, &recipient),
+            router_nonce: 0x0102_0304_0506_0708,
+        };
+        let encoded = note.encode(&env).unwrap();
+        assert_eq!(CctpOutboundNote::decode(&env, &encoded), Ok(note));
+    }
+
+    #[test]
+    fn cctp_outbound_note_refuses_missing_mapping_revision() {
+        let env = Env::default();
+        let mut recipient = [0u8; 32];
+        recipient[12..].copy_from_slice(&[0xA1u8; 20]);
+        let note = CctpOutboundNote {
+            mapping_revision: 0,
+            recipient: BytesN::from_array(&env, &recipient),
+            router_nonce: 1,
+        };
+        assert_eq!(note.encode(&env), Err(HyperionError::StaleMapping));
     }
 
     #[test]

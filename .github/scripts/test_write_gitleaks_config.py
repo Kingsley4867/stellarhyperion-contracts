@@ -27,7 +27,7 @@ class GitleaksConfigurationTests(unittest.TestCase):
         rule = value["rules"][0]
         self.assertEqual(set(rule), {"id", "allowlists"})
         self.assertEqual(rule["id"], "generic-api-key")
-        self.assertEqual(len(rule["allowlists"]), 3)
+        self.assertEqual(len(rule["allowlists"]), 4)
         for allowlist in rule["allowlists"]:
             self.assertEqual(allowlist["condition"], "AND")
             self.assertEqual(allowlist["regexTarget"], "secret")

@@ -365,6 +365,9 @@ pub struct Destination {
     // truncating, because a Stellar key that ends up in this field looks perfectly valid
     // once you chop the front off it.
     pub address: BytesN<32>,
+    /// Mapping generation explicitly accepted by the sender for CCTP.
+    /// Other routes ignore this field and use zero.
+    pub mapping_revision: u32,
 }
 
 // `Origin` and `Recipient` live in `hyperion-core` rather than here, because both sides of the

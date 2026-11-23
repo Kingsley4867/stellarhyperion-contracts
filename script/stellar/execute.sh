@@ -12,6 +12,11 @@
 #
 # Usage: script/stellar/execute.sh
 source "$(dirname "$0")/lib.sh"
+if is_dry_run; then
+  command -v node >/dev/null || die "node is not on PATH"
+  node "$CONTRACTS_ROOT/script/stellar/unsigned-plan.mjs" execute || die "unsigned execute plan refused"
+  exit 0
+fi
 require_tools
 require_identity
 

@@ -22,6 +22,11 @@
 #   stellar keys generate hyperion-deploy --network testnet --fund
 #   HYPERION_PEER_CHAIN=arc-testnet script/stellar/deploy.sh
 source "$(dirname "$0")/lib.sh"
+if is_dry_run; then
+  command -v node >/dev/null || die "node is not on PATH"
+  node "$CONTRACTS_ROOT/script/stellar/unsigned-plan.mjs" deploy || die "unsigned deploy plan refused"
+  exit 0
+fi
 require_tools
 require_identity
 

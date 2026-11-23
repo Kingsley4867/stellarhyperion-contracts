@@ -212,6 +212,16 @@ export const cctpAdapterAbi = [
             "name": "strkey",
             "type": "string",
             "internalType": "string"
+          },
+          {
+            "name": "mappingRevision",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "remoteDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
           }
         ]
       }
@@ -260,6 +270,16 @@ export const cctpAdapterAbi = [
             "name": "strkey",
             "type": "string",
             "internalType": "string"
+          },
+          {
+            "name": "mappingRevision",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
+            "name": "remoteDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
           }
         ]
       },
@@ -372,6 +392,21 @@ export const cctpAdapterAbi = [
             "internalType": "bytes32"
           },
           {
+            "name": "localDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "remoteDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "mappingRevision",
+            "type": "uint32",
+            "internalType": "uint32"
+          },
+          {
             "name": "configured",
             "type": "bool",
             "internalType": "bool"
@@ -411,6 +446,26 @@ export const cctpAdapterAbi = [
             "name": "mintRecipient",
             "type": "bytes32",
             "internalType": "bytes32"
+          },
+          {
+            "name": "remoteToken",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "localDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "remoteDecimals",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "mappingRevision",
+            "type": "uint32",
+            "internalType": "uint32"
           },
           {
             "name": "configured",
@@ -787,6 +842,11 @@ export const cctpAdapterAbi = [
         "name": "burnToken",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [],
@@ -812,6 +872,34 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "function",
+    "name": "setInboundMapping",
+    "inputs": [
+      {
+        "name": "domain",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "burnToken",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "revision",
+        "type": "uint32",
+        "internalType": "uint32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setLane",
     "inputs": [
       {
@@ -828,6 +916,16 @@ export const cctpAdapterAbi = [
         "name": "mintRecipient",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "remoteToken",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ],
     "outputs": [],
@@ -846,6 +944,34 @@ export const cctpAdapterAbi = [
         "name": "enabled",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setLaneMapping",
+    "inputs": [
+      {
+        "name": "chain",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "remoteToken",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "revision",
+        "type": "uint32",
+        "internalType": "uint32"
       }
     ],
     "outputs": [],
@@ -1060,6 +1186,18 @@ export const cctpAdapterAbi = [
         "type": "bytes32",
         "indexed": false,
         "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "mappingRevision",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
       }
     ],
     "anonymous": false
@@ -1104,6 +1242,24 @@ export const cctpAdapterAbi = [
         "type": "bytes32",
         "indexed": false,
         "internalType": "bytes32"
+      },
+      {
+        "name": "remoteToken",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "remoteDecimals",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "mappingRevision",
+        "type": "uint32",
+        "indexed": false,
+        "internalType": "uint32"
       }
     ],
     "anonymous": false
@@ -1276,6 +1432,11 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "InvalidDecimals",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidDestination",
     "inputs": []
   },
@@ -1349,6 +1510,11 @@ export const cctpAdapterAbi = [
   },
   {
     "type": "error",
+    "name": "StaleMapping",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "TimelockDelayOutOfRange",
     "inputs": []
   },
@@ -1386,11 +1552,6 @@ export const cctpAdapterAbi = [
   {
     "type": "error",
     "name": "UnknownChain",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "UnsupportedHookVersion",
     "inputs": []
   },
   {

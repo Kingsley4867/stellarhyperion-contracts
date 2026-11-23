@@ -64,9 +64,14 @@ impl World {
     pub fn new() -> Self {
         let world = Self::unlinked();
         world.link_ethereum();
-        world
-            .adapter()
-            .map_asset(&ETHEREUM_DOMAIN, &world.eth_usdc(), &world.token_id);
+        world.adapter().map_asset(
+            &ETHEREUM_DOMAIN,
+            &world.eth_usdc(),
+            &world.token_id,
+            &hyperion_core::STELLAR_DECIMALS,
+            &EVM_DECIMALS,
+            &1,
+        );
         world.fund_user(HUNDRED * 10);
         world
     }
@@ -259,10 +264,10 @@ impl World {
     /// them is all a rail ever carries and going through the strkey form here would hide a
     /// round trip the production path has to get right.
     pub fn hook_to_recipient(&self) -> Bytes {
-        HyperionHook::new(StellarDestination::contract(BytesN::from_array(
-            &self.env,
-            &self.recipient_key,
-        )))
+        HyperionHook::new(
+            1,
+            StellarDestination::contract(BytesN::from_array(&self.env, &self.recipient_key)),
+        )
         .encode(&self.env)
         .unwrap()
     }
@@ -280,34 +285,37 @@ impl World {
     pub fn hook_to_nobody(&self) -> Bytes {
         let mut raw = Bytes::new(&self.env);
         raw.push_back(cctp::HOOK_VERSION);
+        raw.append(&Bytes::from_slice(&self.env, &1u32.to_be_bytes()));
         raw.push_back(hyperion_core::address::KIND_ACCOUNT);
         raw.append(&Bytes::from_array(&self.env, &[0u8; 32]));
         raw
     }
 
     pub fn hook_to_account(&self, key: &[u8; 32]) -> Bytes {
-        HyperionHook::new(StellarDestination::account(BytesN::from_array(
-            &self.env, key,
-        )))
+        HyperionHook::new(
+            1,
+            StellarDestination::account(BytesN::from_array(&self.env, key)),
+        )
         .encode(&self.env)
         .unwrap()
     }
 
     pub fn hook_to_contract(&self, addr: &Address) -> Bytes {
         let key = codec::contract_key(&self.env, addr).unwrap();
-        HyperionHook::new(StellarDestination::contract(BytesN::from_array(
-            &self.env, &key,
-        )))
+        HyperionHook::new(
+            1,
+            StellarDestination::contract(BytesN::from_array(&self.env, &key)),
+        )
         .encode(&self.env)
         .unwrap()
     }
 
     /// A hook naming a muxed account, which this route has nowhere to put.
     pub fn hook_to_muxed(&self) -> Bytes {
-        HyperionHook::new(StellarDestination::muxed(
-            BytesN::from_array(&self.env, &self.classic_key),
-            99,
-        ))
+        HyperionHook::new(
+            1,
+            StellarDestination::muxed(BytesN::from_array(&self.env, &self.classic_key), 99),
+        )
         .encode(&self.env)
         .unwrap()
     }

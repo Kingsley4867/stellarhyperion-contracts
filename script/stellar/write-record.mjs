@@ -30,9 +30,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   loadDeploymentProtocol,
   storageMigrationFromEnv,
+  readBoundedText,
 } from "./record-evidence.mjs";
 import { rpcClient } from "./restore-plan.mjs";
 import { validateRpcUrl } from "./rollback-report.mjs";
+import { buildUnsignedPlan } from "./unsigned-plan.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsRoot = resolve(here, "..", "..");
@@ -95,6 +97,10 @@ export async function buildRecord(env = process.env, dependencies = {}) {
    * against the chain's own history, and a wrong one makes an indexer start from the wrong place.
    */
   async function latestLedger() {
+    if (dependencies.offline)
+      throw new Error(
+        "unsigned record planning requires an explicit public deployment ledger",
+      );
     const endpoint = validateRpcUrl(env.STELLAR_RPC_URL || entry.defaultRpcUrl);
     const rpc = dependencies.rpc ?? rpcClient(endpoint);
     const network = await rpc("getNetwork", {});
@@ -112,6 +118,14 @@ export async function buildRecord(env = process.env, dependencies = {}) {
 
   /** The commit the wasm was built from. The only thing tying a contract id to a source tree. */
   function commit() {
+    if (dependencies.offline) {
+      const claimed = need("HYPERION_SOURCE_COMMIT");
+      if (!/^[0-9a-f]{40}$/.test(claimed))
+        throw new Error(
+          "HYPERION_SOURCE_COMMIT requires a full reviewed source revision",
+        );
+      return claimed;
+    }
     try {
       return execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: contractsRoot,
@@ -225,6 +239,28 @@ export async function buildRecord(env = process.env, dependencies = {}) {
     flowWindow: integer("HYPERION_FLOW_WINDOW_LEDGERS", 1),
     timelockDelay: integer("HYPERION_TIMELOCK_DELAY"),
     wasmHashes,
+    ...(env.CCTP_TOKEN_MESSENGER ||
+    env.CCTP_MESSAGE_TRANSMITTER ||
+    env.AXELAR_ITS
+      ? {
+          providers: {
+            ...(env.CCTP_TOKEN_MESSENGER
+              ? { cctpTokenMessenger: env.CCTP_TOKEN_MESSENGER }
+              : {}),
+            ...(env.CCTP_MESSAGE_TRANSMITTER
+              ? { cctpMessageTransmitter: env.CCTP_MESSAGE_TRANSMITTER }
+              : {}),
+            ...(env.AXELAR_ITS ? { axelarIts: env.AXELAR_ITS } : {}),
+          },
+        }
+      : {}),
+    ...(env.HYPERION_CODE_IDENTITIES
+      ? {
+          providerCodeHashes: JSON.parse(
+            readBoundedText(env.HYPERION_CODE_IDENTITIES),
+          ),
+        }
+      : {}),
     deployedAt: {
       ledger:
         env.HYPERION_ROUTER_LEDGER ||
@@ -258,6 +294,17 @@ export async function buildRecord(env = process.env, dependencies = {}) {
       "QUEUE_WHAT_JSON",
       (value) => typeof value === "string" && value.length <= 2048,
     ),
+    ...(env.QUEUE_DETAILS_JSON
+      ? {
+          queuedActionDetails: queue(
+            "QUEUE_DETAILS_JSON",
+            (value) =>
+              value !== null &&
+              typeof value === "object" &&
+              !Array.isArray(value),
+          ),
+        }
+      : {}),
   };
 
   const record = {
@@ -276,7 +323,23 @@ export async function runCli(args = process.argv.slice(2)) {
   const [out, ...extra] = args;
   if (!out || out.length > 4096 || extra.length)
     throw new Error("usage: write-record.mjs <path>");
-  const record = await buildRecord();
+  const offline = process.env.HYPERION_DRY_RUN === "1";
+  const record = await buildRecord(process.env, { offline });
+  if (offline) {
+    const plan = await buildUnsignedPlan("record", process.env, { record });
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ...plan,
+          path: resolve(out),
+          record,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return record;
+  }
   mkdirSync(dirname(resolve(out)), { recursive: true });
   writeFileSync(resolve(out), `${JSON.stringify(record, null, 2)}\n`);
   process.stdout.write(`validated and written: ${out}\n`);

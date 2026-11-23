@@ -7,12 +7,13 @@ use super::{
 use crate::types::{AdminAction, Destination, OutboundRequest};
 use hyperion_core::{
     model::{MODEL_FUNDS, MODEL_LIMIT},
-    AddressKind, ChainClock, ModelRouter, Operation, Rail, RouteKind,
+    timelock_boundary_cases_for, AddressKind, ChainClock, HyperionError, ModelError, ModelRouter,
+    Operation, Rail, RouteKind,
 };
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address,
+    Address, InvokeError,
 };
 use std::vec::Vec;
 
@@ -20,6 +21,7 @@ struct Driver {
     w: World,
     token: Address,
     recipients: [Address; 2],
+    nominees: [Address; 5],
     model: ModelRouter,
     queue_base: u64,
 }
@@ -44,10 +46,12 @@ impl Driver {
         w.env.ledger().with_mut(|l| l.timestamp = 1701000000);
         let recipients = [w.recipient.clone(), Address::generate(&w.env)];
         let queue_base = w.router().queue_count();
+        let nominees = core::array::from_fn(|_| Address::generate(&w.env));
         Self {
             w,
             token,
             recipients,
+            nominees,
             model: ModelRouter::new(ChainClock::Soroban {
                 ledger: 100000,
                 timestamp: 1701000000,
@@ -59,7 +63,8 @@ impl Driver {
         match actor {
             0 => self.w.admin.clone(),
             1 => self.w.guardian.clone(),
-            _ => self.w.user.clone(),
+            2 => self.w.user.clone(),
+            _ => self.nominees[usize::from(actor - 3)].clone(),
         }
     }
     fn real(&self, op: Operation) -> Result<u64, ()> {
@@ -75,6 +80,7 @@ impl Driver {
                         destination: Destination {
                             chain: self.w.ethereum(),
                             address: evm_destination(&self.w.env, 1),
+                            mapping_revision: 0,
                         },
                         destination_decimals: 6,
                         min_destination_amount: 0,
@@ -126,6 +132,23 @@ impl Driver {
                 .map_err(|_| ())?
                 .map(|id| id - self.queue_base)
                 .map_err(|_| ()),
+            Operation::QueueAuthority {
+                actor,
+                target,
+                guardian,
+            } => r
+                .try_queue_action(
+                    &self.actor(actor),
+                    &if guardian {
+                        AdminAction::SetGuardian(self.actor(target))
+                    } else {
+                        AdminAction::SetAdmin(self.actor(target))
+                    },
+                )
+                .map_err(|_| ())?
+                .map(|id| id - self.queue_base)
+                .map_err(|_| ()),
+            Operation::Renounce { .. } => Err(()),
             Operation::Execute { actor, id } => r
                 .try_execute_action(&self.actor(actor), &(self.queue_base + id as u64))
                 .map_err(|_| ())?
@@ -144,9 +167,23 @@ impl Driver {
         }
     }
     fn step(&mut self, word: u64) -> Result<u64, ()> {
-        let op = Operation::decode(word);
+        self.step_operation(Operation::decode(word))
+    }
+    fn step_operation(&mut self, op: Operation) -> Result<u64, ()> {
+        let payload = match op {
+            Operation::Execute { id, .. } | Operation::Cancel { id, .. } => {
+                self.model.action_details(id)
+            }
+            _ => None,
+        };
         let expected = self.model.apply(op).map_err(|_| ());
-        assert_eq!(self.real(op), expected, "operation {op:?} word={word}");
+        assert_eq!(
+            self.real(op),
+            expected,
+            "chain_time={} ledger={} operation={op:?} full_action_payload={payload:?}",
+            self.w.env.ledger().timestamp(),
+            self.w.env.ledger().sequence(),
+        );
         let token = self.w.failable(&self.token);
         let addresses = [
             &self.w.user,
@@ -167,6 +204,14 @@ impl Driver {
         let cfg = self.w.router().get_config();
         assert_eq!(cfg.paused, self.model.paused);
         assert_eq!(cfg.fee_bps as u64, self.model.fee_bps);
+        assert_eq!(
+            cfg.admin,
+            self.actor(self.model.admin_actors.trailing_zeros() as u8)
+        );
+        assert_eq!(
+            cfg.guardian,
+            self.actor(self.model.guardian_actors.trailing_zeros() as u8)
+        );
         assert_eq!(self.w.router().claim_count(), self.model.claim_count as u64);
         assert_eq!(
             self.w.router().queue_count() - self.queue_base,
@@ -215,6 +260,112 @@ fn common_generated_corpus_matches_real_soroban() {
         assert_eq!(&driver.model.balances, &row[3..9]);
     }
 }
+
+fn admin_error(error: Result<HyperionError, InvokeError>) -> ModelError {
+    match error {
+        Ok(HyperionError::Unauthorized) => ModelError::Unauthorized,
+        Ok(HyperionError::TimelockNotReady) => ModelError::Early,
+        Ok(HyperionError::TimelockExpired) => ModelError::Expired,
+        Ok(HyperionError::TimelockNotQueued) => ModelError::Missing,
+        other => panic!("unexpected administration failure: {other:?}"),
+    }
+}
+
+impl Driver {
+    fn administration(&self, op: Operation) -> Result<u64, ModelError> {
+        let router = self.w.router();
+        match op {
+            Operation::QueueFee { actor, bps } => router
+                .try_queue_action(&self.actor(actor), &AdminAction::SetFeeBps(bps as u32))
+                .map_err(admin_error)?
+                .map(|id| id - self.queue_base)
+                .map_err(|error| panic!("invalid queue return: {error:?}")),
+            Operation::QueueAuthority {
+                actor,
+                target,
+                guardian,
+            } => router
+                .try_queue_action(
+                    &self.actor(actor),
+                    &if guardian {
+                        AdminAction::SetGuardian(self.actor(target))
+                    } else {
+                        AdminAction::SetAdmin(self.actor(target))
+                    },
+                )
+                .map_err(admin_error)?
+                .map(|id| id - self.queue_base)
+                .map_err(|error| panic!("invalid queue return: {error:?}")),
+            Operation::Execute { actor, id } => router
+                .try_execute_action(&self.actor(actor), &(self.queue_base + id as u64))
+                .map_err(admin_error)?
+                .map(|_| 0)
+                .map_err(|error| panic!("invalid execute return: {error:?}")),
+            Operation::Cancel { actor, id } => router
+                .try_cancel_action(&self.actor(actor), &(self.queue_base + id as u64))
+                .map_err(admin_error)?
+                .map(|_| 0)
+                .map_err(|error| panic!("invalid cancel return: {error:?}")),
+            Operation::Pause { actor } => router
+                .try_pause(&self.actor(actor))
+                .map_err(admin_error)?
+                .map(|_| 0)
+                .map_err(|error| panic!("invalid pause return: {error:?}")),
+            Operation::Unpause { actor } => router
+                .try_unpause(&self.actor(actor))
+                .map_err(admin_error)?
+                .map(|_| 0)
+                .map_err(|error| panic!("invalid unpause return: {error:?}")),
+            Operation::Advance { .. } => Ok(0),
+            _ => panic!("unexpected administration operation"),
+        }
+    }
+}
+
+#[test]
+fn generated_timelock_boundary_sequence_preserves_authority() {
+    for seed in 0..12 {
+        let mut driver = Driver::new();
+        for case in timelock_boundary_cases_for(seed, driver.model.clock) {
+            let before = driver.model.clone();
+            let payload = match case.operation {
+                Operation::Execute { id, .. } | Operation::Cancel { id, .. } => {
+                    before.action_details(id)
+                }
+                _ => None,
+            };
+            let expected = driver.model.apply(case.operation);
+            let actual = driver.administration(case.operation);
+            assert_eq!(actual, expected, "seed={seed} phase={} chain_time={} ledger={} full_operation={:?} queued_payload={payload:?}",
+                case.name, driver.w.env.ledger().timestamp(), driver.w.env.ledger().sequence(), case.operation);
+            // The typed invocation above performed the real transition; do not invoke a second time.
+            if let Operation::Advance { seconds, ledgers } = case.operation {
+                driver.w.advance_time(seconds);
+                driver.w.advance_ledgers(ledgers as u32);
+            }
+            if expected.is_err() {
+                assert_eq!(driver.model, before);
+            }
+            let config = driver.w.router().get_config();
+            assert_eq!(
+                config.admin,
+                driver.actor(driver.model.admin_actors.trailing_zeros() as u8)
+            );
+            assert_eq!(
+                config.guardian,
+                driver.actor(driver.model.guardian_actors.trailing_zeros() as u8)
+            );
+            assert_eq!(config.fee_bps as u64, driver.model.fee_bps);
+            assert_eq!(config.paused, driver.model.paused);
+            assert_eq!(
+                driver.w.router().queue_count() - driver.queue_base,
+                driver.model.action_count as u64
+            );
+            assert!(driver.model.conserved());
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 48, max_shrink_iters: 4096, .. ProptestConfig::default() })]
     #[test]

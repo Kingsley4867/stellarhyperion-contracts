@@ -11,6 +11,8 @@ use crate::types::{
 pub const BUMP_THRESHOLD: u32 = 17_280;
 pub const BUMP_TO: u32 = 518_400;
 pub const VALIDATOR_ROTATION_DELAY: u64 = 3_600;
+/// The longest a legacy epoch-zero acceptance window may stay open: seven days.
+pub const MAX_LEGACY_ATTESTATION_WINDOW: u64 = 604_800;
 
 #[contracttype]
 #[derive(Clone)]
@@ -30,6 +32,8 @@ pub enum DataKey {
     PendingValidator,
     EmergencyDisabled,
     Outbound(u64),
+    /// Timestamp after which raw provider-digest signatures from epoch-zero storage are refused.
+    LegacyAttestationDeadline,
 }
 
 pub fn config(env: &Env) -> Result<Config, HyperionError> {
@@ -217,6 +221,26 @@ pub fn set_pending_validator(env: &Env, value: &PendingValidator) {
 
 pub fn clear_pending_validator(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingValidator);
+}
+
+/// The explicit migration window during which legacy epoch-zero signatures are still accepted.
+pub fn legacy_attestation_deadline(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&DataKey::LegacyAttestationDeadline)
+}
+
+pub fn set_legacy_attestation_deadline(env: &Env, at: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LegacyAttestationDeadline, &at);
+    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
+
+pub fn clear_legacy_attestation_deadline(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::LegacyAttestationDeadline);
 }
 
 pub fn emergency_disabled(env: &Env) -> bool {

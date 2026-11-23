@@ -16,6 +16,11 @@
 #
 # Usage: script/stellar/verify.sh
 source "$(dirname "$0")/lib.sh"
+if is_dry_run; then
+  command -v node >/dev/null || die "node is not on PATH"
+  node "$CONTRACTS_ROOT/script/stellar/unsigned-plan.mjs" verify || die "unsigned verify plan refused"
+  exit 0
+fi
 require_tools
 
 RECORD="${HYPERION_RECORD:-$RECORD_DIR/stellar-$NETWORK-phase1.json}"
@@ -195,6 +200,13 @@ fi
 say "Historical cleanup: claim_history distinguishes Live, intentional Archived(id), and Unavailable (restore via RPC)."
 say "Cost capture (read-only): node script/stellar/storage-cost.mjs --rpc RPC_URL --request recorded-keysets.json"
 say "Cost replay: node script/stellar/storage-cost.mjs --record recorded-rpc.json"
+
+note "consumer deployment copies"
+say "Read-only cross-repository consistency check (backend and frontend at explicit commits):"
+say "  script/stellar/check-deployment-copies.sh \\"
+say "    --copy stellarhyperion-backend=git:../stellarhyperion-backend:\$BACKEND_COMMIT:deployments/stellar-testnet-phase1.json \\"
+say "    --copy stellarhyperion-frontend=git:../stellarhyperion-frontend:\$FRONTEND_COMMIT:deployments/stellar-testnet-phase1.json"
+say "Archived records are reported as archived, never rewritten. See docs/TESTNET_ACTIVATION.md."
 
 note "rollback feasibility"
 say "Read-only report — signs nothing, executes nothing:"
